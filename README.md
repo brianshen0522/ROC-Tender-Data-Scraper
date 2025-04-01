@@ -1,0 +1,96 @@
+# Tender Data Scraper
+
+A web scraper for collecting tender data from a Taiwanese government procurement website, with automated CAPTCHA solving capabilities.
+
+## Project Structure
+
+```
+.
+├── .env                    # Environment variables and configuration
+├── main.py                 # Main entry point for the scraper
+├── database.py             # Database connection and operations
+├── scraper.py              # Web scraping functions
+├── captcha_solver.py       # CAPTCHA solving functionality
+├── utils.py                # Utility functions
+├── requirements.txt        # Python dependencies
+├── debug_images/           # Directory for debug images (created automatically)
+└── poker/model/best.pt     # YOLO model for CAPTCHA solving
+```
+
+## Setup
+
+1. Install the required dependencies:
+   ```
+   pip install -r requirements.txt
+   ```
+
+2. Set up the `.env` file with your database credentials and default settings:
+   ```
+   # Database connection settings
+   DB_NAME=tender
+   DB_USER=yourusername
+   DB_PASSWORD=yourpassword
+   DB_HOST=localhost
+   DB_PORT=5432
+
+   # Scraper settings
+   DEFAULT_QUERY=案
+   DEFAULT_TIME_RANGE=113
+   DEFAULT_PAGE_SIZE=100
+   ```
+
+3. Ensure the YOLO model is in the correct location:
+   ```
+   ./poker/model/best.pt
+   ```
+
+## Usage
+
+Run the scraper with default settings from the `.env` file:
+```
+python main.py
+```
+
+Or specify command-line arguments to override the defaults:
+```
+python main.py --query "關鍵字" --time "113" --size 50 --headless
+```
+
+### Command Line Arguments
+
+- `--query`: Query sentence for tender search (default: from `.env` or '案')
+- `--time`: Republic of China era year to search (default: from `.env` or '113')
+- `--size`: Page size for results (default: from `.env` or 100, max: 100)
+- `--headless`: Run browser in headless mode (default: off)
+
+## Features
+
+- **Web Scraping**: Automatically navigates paginated search results
+- **CAPTCHA Solving**: Uses a YOLO model to solve card-based CAPTCHAs
+- **Database Storage**: Stores data in PostgreSQL with proper schema
+- **Error Handling**: Robust error handling and retry mechanisms
+- **Configurable**: Easily configure settings via `.env` file or command-line arguments
+
+## Database Schema
+
+The scraper stores data in two PostgreSQL tables:
+
+1. **organizations**: Stores information about organizations
+   - `site_id` (TEXT, PRIMARY KEY): Organization's site ID
+   - `name` (TEXT, UNIQUE NOT NULL): Organization's name
+
+2. **tenders**: Stores tender information
+   - `organization_id` (TEXT, FOREIGN KEY): Reference to organizations table
+   - `tender_no` (TEXT): Tender number
+   - `url` (TEXT, PRIMARY KEY): URL of the tender
+   - `project_name` (TEXT): Name of the tender project
+   - `publication_date` (DATE): Publication date
+   - `deadline` (DATE): Tender deadline
+   - `scrap_status` (TEXT): Status of scraping ('finished', 'failed')
+   - ... (many more fields from the tender details)
+
+## Notes
+
+- The CAPTCHA solving functionality requires the OpenCV and Ultralytics (YOLO) libraries
+- The scraper uses a pretrained YOLO model for card recognition
+- Browser automation is handled by Selenium with Chrome WebDriver
