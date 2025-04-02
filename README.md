@@ -1,6 +1,6 @@
 # Tender Data Scraper
 
-A web scraper for collecting tender data from a Taiwanese government procurement website, with automated CAPTCHA solving capabilities.
+A web scraper for collecting tender data from a Taiwanese government procurement website, with automated CAPTCHA solving capabilities and a Textual-based TUI (Text User Interface).
 
 ## Project Structure
 
@@ -8,13 +8,13 @@ A web scraper for collecting tender data from a Taiwanese government procurement
 .
 ├── .env                    # Environment variables and configuration
 ├── main.py                 # Main entry point for the scraper
+├── tui.py                  # Textual-based TUI for running the scraper
 ├── database.py             # Database connection and operations
 ├── scraper.py              # Web scraping functions
 ├── captcha_solver.py       # CAPTCHA solving functionality
 ├── utils.py                # Utility functions
 ├── requirements.txt        # Python dependencies
-├── debug_images/           # Directory for debug images (created automatically)
-└── poker/model/best.pt     # YOLO model for CAPTCHA solving
+└── debug_images/           # Directory for debug images (created automatically)
 ```
 
 ## Setup
@@ -25,7 +25,7 @@ A web scraper for collecting tender data from a Taiwanese government procurement
    ```
 
 2. Set up the `.env` file with your database credentials and default settings:
-   ```
+   ```env
    # Database connection settings
    DB_NAME=tender
    DB_USER=yourusername
@@ -39,12 +39,22 @@ A web scraper for collecting tender data from a Taiwanese government procurement
    DEFAULT_PAGE_SIZE=100
    ```
 
-3. Ensure the YOLO model is in the correct location:
-   ```
-   ./poker/model/best.pt
-   ```
-
 ## Usage
+
+### Running the TUI
+
+The project includes a Textual-based TUI for an interactive experience. To launch the TUI:
+```
+python tui.py
+```
+
+The TUI allows you to:
+- Enter scraper parameters (query, time range, page size, etc.)
+- Enable or disable headless mode and debug file retention
+- View real-time logs of the scraping process
+- Start and stop the scraper interactively
+
+### Running the Scraper Directly
 
 Run the scraper with default settings from the `.env` file:
 ```
@@ -62,14 +72,16 @@ python main.py --query "關鍵字" --time "113" --size 50 --headless
 - `--time`: Republic of China era year to search (default: from `.env` or '113')
 - `--size`: Page size for results (default: from `.env` or 100, max: 100)
 - `--headless`: Run browser in headless mode (default: off)
+- `--keep-debug`: Keep debug images after CAPTCHA solving (default: off)
 
 ## Features
 
 - **Web Scraping**: Automatically navigates paginated search results
-- **CAPTCHA Solving**: Uses a YOLO model to solve card-based CAPTCHAs
+- **CAPTCHA Solving**: Solves card-based CAPTCHAs using image processing techniques
 - **Database Storage**: Stores data in PostgreSQL with proper schema
 - **Error Handling**: Robust error handling and retry mechanisms
 - **Configurable**: Easily configure settings via `.env` file or command-line arguments
+- **Interactive TUI**: Provides a user-friendly interface for running the scraper
 
 ## Database Schema
 
@@ -91,6 +103,6 @@ The scraper stores data in two PostgreSQL tables:
 
 ## Notes
 
-- The CAPTCHA solving functionality requires the OpenCV and Ultralytics (YOLO) libraries
-- The scraper uses a pretrained YOLO model for card recognition
-- Browser automation is handled by Selenium with Chrome WebDriver
+- The CAPTCHA solving functionality uses OpenCV and image processing techniques.
+- Browser automation is handled by Selenium with Chrome WebDriver.
+- The TUI is built using the Textual framework for a modern terminal-based interface.
