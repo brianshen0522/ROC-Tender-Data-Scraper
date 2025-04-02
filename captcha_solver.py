@@ -390,6 +390,7 @@ def test_captcha_solver():
     # Initialize Chrome WebDriver directly
     try:
         driver = webdriver.Chrome(options=chrome_options)
+        driver.maximize_window()
     except Exception as e:
         print(f"❌ Failed to initialize Chrome WebDriver: {str(e)}")
         print("Make sure you have Chrome installed on your system and ChromeDriver is in your PATH.")

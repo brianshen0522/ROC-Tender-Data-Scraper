@@ -1,4 +1,5 @@
 import time
+import logging
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
@@ -9,19 +10,23 @@ from captcha_solver import handle_captcha
 from utils import parse_roc_date
 
 def setup_selenium_driver(headless=False):
-    """Set up and return a configured Selenium WebDriver"""
+    """Set up and return a configured Selenium WebDriver with logs disabled."""
+    # Suppress Selenium's own logging
+    # logging.getLogger('selenium').setLevel(logging.WARNING)
+    
     chrome_options = Options()
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
     chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
     chrome_options.add_experimental_option("useAutomationExtension", False)
     chrome_options.add_argument("--disable-cache")
+    chrome_options.add_argument("--log-level=3")  # Additional Chrome log suppression
     
     if headless:
         chrome_options.add_argument("--headless")
     
     print("🔐 Setting up secure browser session...")
     driver = webdriver.Chrome(options=chrome_options)
-    
+    driver.maximize_window()
     # Execute CDP commands to avoid detection
     driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
         "source": """
