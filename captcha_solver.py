@@ -1,3 +1,5 @@
+# test_captcha_solver.py - Standalone test script for PCC Taiwan CAPTCHA solver
+
 import os
 import sys
 import time
@@ -5,33 +7,52 @@ import cv2
 import numpy as np
 import traceback
 from datetime import datetime
+from contextlib import contextmanager
+import glob
+import io
+from PIL import Image
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import UnexpectedAlertPresentException, TimeoutException, NoSuchElementException
-from PIL import Image
-import io
-from ultralytics import YOLO
-from utils import suppress_output, setup_debug_directory, cleanup_debug_images
 
-# Initialize debug directory
-setup_debug_directory()
+# Create necessary directories
+def setup_directories():
+    """Create necessary directories for the script to run"""
+    os.makedirs("debug_images", exist_ok=True)
+    print("✓ Debug directory created")
 
-# Load the YOLO model (suppress detailed output)
-@suppress_output
-def load_yolo_model():
+# Utility functions
+@contextmanager
+def suppress_output():
+    """Context manager to suppress standard output"""
+    # Save original stdout and stderr
+    old_stdout = sys.stdout
+    old_stderr = sys.stderr
+    
     try:
-        model = YOLO(r".\\poker\\model\\best.pt")  # Load the trained model
-        print("YOLO model loaded successfully")
-        return model
-    except Exception as e:
-        print(f"Error loading YOLO model: {str(e)}")
-        print(traceback.format_exc())
-        return None
+        # Redirect stdout and stderr to devnull
+        with open(os.devnull, 'w') as devnull:
+            sys.stdout = devnull
+            sys.stderr = devnull
+            yield
+    finally:
+        # Restore original stdout and stderr
+        sys.stdout = old_stdout
+        sys.stderr = old_stderr
 
-# Global YOLO model instance
-model = load_yolo_model()
+def cleanup_debug_images(keep_files=False):
+    """Delete all debug images unless keep_files is True"""
+    if not keep_files:
+        for f in glob.glob("debug_images/*.png"):
+            try:
+                os.remove(f)
+            except:
+                pass
 
+# Functions from the original code
 def capture_image_from_element(driver, xpath):
     """Capture an image from an element identified by XPath"""
     try:
@@ -105,75 +126,43 @@ def identify_color(image):
         print(traceback.format_exc())
         return "unknown"
 
-@suppress_output
-def identify_card_with_yolo(image):
-    """Identify the card using the YOLO classification model"""
-    if model is None:
-        return "unknown"
-        
-    # Create a copy of the image for debugging
-    debug_img = image.copy()
-    
-    # Save the original image for debugging
-    timestamp = int(time.time() * 1000)
-    cv2.imwrite(f'debug_images/orig_{timestamp}.png', debug_img)
-    
-    # Save the image temporarily
-    temp_image_path = f'debug_images/temp_{timestamp}.png'
-    cv2.imwrite(temp_image_path, image)
-    
+def calculate_overlap_ratio(image1, image2):
+    """Calculate the similarity/overlap ratio between two card images"""
     try:
-        # Run prediction on the image
-        results = model(temp_image_path)
-        print(results)
-        # Check if results is not empty
-        if results and len(results) > 0:
-            # Get the first result
-            result = results[0]
-            
-            # For classification models, we need to access the probs attribute
-            if hasattr(result, 'probs') and result.probs is not None:
-                # Get class with highest probability
-                class_idx = int(result.probs.top1)
-                confidence = float(result.probs.top1conf)
-                
-                # Get the class name
-                if hasattr(result, 'names') and result.names is not None:
-                    class_name = result.names[class_idx]
-                    print(f"Predicted card: {class_name}, Confidence: {confidence:.3f}")
-                    return class_name
-                else:
-                    print("Names dictionary not found in result")
-                    return "unknown"
-            # Alternative access method if the above doesn't work
-            elif hasattr(result, 'names') and result.names is not None:
-                # Try to directly get the predicted class
-                if hasattr(result, 'verbose') and isinstance(result.verbose, bool):
-                    # Parse without printing full results
-                    for line in str(results).split('\n'):
-                        if line.strip() and ' ' in line:
-                            parts = line.split(' ')
-                            if len(parts) >= 2 and parts[1].strip():
-                                class_name = parts[0].strip()
-                                confidence = float(parts[1].strip())
-                                print(f"Card: {class_name}, Confidence: {confidence:.3f}")
-                                return class_name
-                
-                print("Could not extract classification result")
-                return "unknown"
-            else:
-                print("No probs attribute or names dictionary found")
-                return "unknown"
-        else:
-            print("Empty results from model")
-            return "unknown"
+        # Convert both images to grayscale for better comparison
+        gray1 = cv2.cvtColor(image1, cv2.COLOR_BGR2GRAY)
+        gray2 = cv2.cvtColor(image2, cv2.COLOR_BGR2GRAY)
+        
+        # Apply thresholding to convert to binary images (black and white)
+        ret, thresh1 = cv2.threshold(gray1, 127, 255, cv2.THRESH_BINARY)
+        ret, thresh2 = cv2.threshold(gray2, 127, 255, cv2.THRESH_BINARY)
+        
+        # Make sure both images are the same size for comparison
+        h1, w1 = thresh1.shape
+        h2, w2 = thresh2.shape
+        
+        # Resize the second image to match the first if they're different sizes
+        if h1 != h2 or w1 != w2:
+            thresh2 = cv2.resize(thresh2, (w1, h1))
+        
+        # Calculate the difference between the two binary images
+        diff = cv2.bitwise_xor(thresh1, thresh2)
+        
+        # Count the number of matching pixels (where the images are the same)
+        non_zero_pixels = np.count_nonzero(diff)
+        total_pixels = thresh1.shape[0] * thresh1.shape[1]
+        
+        # Calculate the similarity ratio (higher means more similar)
+        similarity_ratio = 1 - (non_zero_pixels / total_pixels)
+        
+        return similarity_ratio
     except Exception as e:
-        print(f"Error in YOLO prediction: {str(e)}")
+        print(f"Error calculating overlap ratio: {str(e)}")
         print(traceback.format_exc())
-        return "unknown"
+        return 0.0
 
 def solve_card_captcha(driver, attempt=1, max_attempts=10):
-    """Solve the card CAPTCHA by matching patterns between areas A and B"""
+    """Solve the card CAPTCHA by using overlap ratio to match patterns between areas A and B"""
     # Only log attempt when retrying
     if attempt > 1:
         print(f"🔄 CAPTCHA retry attempt {attempt}/{max_attempts}")
@@ -203,24 +192,6 @@ def solve_card_captcha(driver, attempt=1, max_attempts=10):
         cv2.imwrite('debug_images/left_half_question.png', left_half)
         cv2.imwrite('debug_images/right_half_question.png', right_half)
         
-        # Analyze cards using YOLO model
-        left_card = identify_card_with_yolo(left_half)
-        right_card = identify_card_with_yolo(right_half)
-            
-        # Fall back to color-based identification if YOLO failed
-        if left_card == "unknown" or right_card == "unknown":
-            left_color = identify_color(left_half)
-            right_color = identify_color(right_half)
-            
-            # If we got at least one card from YOLO, use it
-            if left_card == "unknown":
-                left_card = left_color
-            if right_card == "unknown":
-                right_card = right_color
-        
-        # Cards to match in area B
-        cards_to_match = [left_card, right_card]
-        
         # Get all card images from area B
         card_xpaths = [
             "/html/body/div/div[2]/div/div/div[3]/div/div[4]/form/table[1]/tbody/tr[2]/td/table/tbody/tr/td[2]/table/tbody/tr/td[1]/label/img",
@@ -231,8 +202,10 @@ def solve_card_captcha(driver, attempt=1, max_attempts=10):
             "/html/body/div/div[2]/div/div/div[3]/div/div[4]/form/table[1]/tbody/tr[2]/td/table/tbody/tr/td[2]/table/tbody/tr/td[6]/label/img"
         ]
         
-        # Create a list to store which cards we'll click
-        cards_to_click = []
+        # Create lists to store overlap ratios for each card with left and right templates
+        card_elements = []
+        left_overlap_ratios = []
+        right_overlap_ratios = []
         
         # Analyze each card in area B
         for i, xpath in enumerate(card_xpaths):
@@ -240,21 +213,36 @@ def solve_card_captcha(driver, attempt=1, max_attempts=10):
                 EC.visibility_of_element_located((By.XPATH, xpath))
             )
             
+            card_elements.append(card_element)
             card_image = capture_image_from_element(driver, xpath)
             cv2.imwrite(f'debug_images/card_{i+1}.png', card_image)
             
-            card_name = identify_card_with_yolo(card_image)
+            # Calculate overlap ratios
+            left_ratio = calculate_overlap_ratio(left_half, card_image)
+            right_ratio = calculate_overlap_ratio(right_half, card_image)
             
-            if card_name in cards_to_match:
-                cards_to_click.append((i+1, card_element))
-                cards_to_match.remove(card_name)
-                
-                if not cards_to_match:
-                    break
+            left_overlap_ratios.append(left_ratio)
+            right_overlap_ratios.append(right_ratio)
+            
+            print(f"Card {i+1}: Left ratio: {left_ratio:.3f}, Right ratio: {right_ratio:.3f}")
+        
+        # Find the best matches based on overlap ratios
+        best_left_match_idx = left_overlap_ratios.index(max(left_overlap_ratios))
+        best_right_match_idx = right_overlap_ratios.index(max(right_overlap_ratios))
+        
+        # Avoid duplicate selections if the same card matches both left and right
+        if best_left_match_idx == best_right_match_idx:
+            # If they're the same, find the second-best match for right
+            temp_right_ratios = right_overlap_ratios.copy()
+            temp_right_ratios[best_left_match_idx] = -1  # Exclude the left match
+            best_right_match_idx = temp_right_ratios.index(max(temp_right_ratios))
+        
+        print(f"Best matches: Left -> Card {best_left_match_idx+1}, Right -> Card {best_right_match_idx+1}")
         
         # Click the matching cards
-        for idx, card_element in cards_to_click:
-            card_element.click()
+        card_elements[best_left_match_idx].click()
+        card_elements[best_right_match_idx].click()
+            
         confirm_button_xpath = "//input[@value='確認送出']"
         confirm_button = WebDriverWait(driver, 10).until(
             EC.element_to_be_clickable((By.XPATH, confirm_button_xpath))
@@ -266,6 +254,8 @@ def solve_card_captcha(driver, attempt=1, max_attempts=10):
             # Handle alerts if they appear
             try:
                 alert = WebDriverWait(driver, 3).until(EC.alert_is_present())
+                alert_text = alert.text
+                print(f"Alert message: {alert_text}")
                 alert.accept()  # Press OK on the alert
                 
                 # If alert and have attempts left, try again
@@ -273,7 +263,7 @@ def solve_card_captcha(driver, attempt=1, max_attempts=10):
                     print(f"🔄 CAPTCHA retry needed")
                     # Wait for the page to refresh
                     time.sleep(1)
-                    solve_card_captcha(driver, attempt + 1, max_attempts)
+                    return solve_card_captcha(driver, attempt + 1, max_attempts)
                 else:
                     print(f"❌ Verification failed! Maximum attempts reached.")
                     return False
@@ -285,6 +275,8 @@ def solve_card_captcha(driver, attempt=1, max_attempts=10):
             # Handle alert that appears during click
             try:
                 alert = driver.switch_to.alert
+                alert_text = alert.text
+                print(f"Alert message: {alert_text}")
                 alert.accept()
                 
                 # If alert and have attempts left, try again
@@ -292,7 +284,7 @@ def solve_card_captcha(driver, attempt=1, max_attempts=10):
                     print(f"🔄 CAPTCHA retry needed")
                     # Wait for the page to refresh
                     time.sleep(1)
-                    solve_card_captcha(driver, attempt + 1, max_attempts)
+                    return solve_card_captcha(driver, attempt + 1, max_attempts)
                 else:
                     print(f"❌ Verification failed! Maximum attempts reached.")
                     return False
@@ -345,3 +337,123 @@ def handle_captcha(driver, keep_debug_files=False):
         return success
     
     return True  # No CAPTCHA detected
+
+def check_dependencies():
+    """Check if required dependencies are installed"""
+    missing_deps = []
+    
+    # Check required packages
+    try:
+        import selenium
+        print("✓ Selenium is installed")
+    except ImportError:
+        missing_deps.append("selenium")
+        print("✗ Selenium is not installed")
+    
+    try:
+        import cv2
+        print("✓ OpenCV is installed")
+    except ImportError:
+        missing_deps.append("opencv-python")
+        print("✗ OpenCV is not installed")
+    
+    try:
+        from PIL import Image
+        print("✓ Pillow is installed")
+    except ImportError:
+        missing_deps.append("pillow")
+        print("✗ Pillow is not installed")
+    
+    try:
+        import numpy
+        print("✓ NumPy is installed")
+    except ImportError:
+        missing_deps.append("numpy")
+        print("✗ NumPy is not installed")
+    
+    if missing_deps:
+        print("\n❌ Missing dependencies. Please install them with:")
+        print(f"pip install {' '.join(missing_deps)}")
+        return False
+    
+    return True
+
+def test_captcha_solver():
+    """Run the test for the CAPTCHA solver"""
+    print("\nSetting up Chrome WebDriver...")
+    
+    # Set up Chrome options
+    chrome_options = Options()
+    chrome_options.add_argument("--start-maximized")  # Maximize window
+    chrome_options.add_argument("--log-level=3")  # Suppress logs
+    
+    # Initialize Chrome WebDriver directly
+    try:
+        driver = webdriver.Chrome(options=chrome_options)
+    except Exception as e:
+        print(f"❌ Failed to initialize Chrome WebDriver: {str(e)}")
+        print("Make sure you have Chrome installed on your system and ChromeDriver is in your PATH.")
+        return False
+    
+    try:
+        print(f"Navigating to the CAPTCHA test page...")
+        driver.get("https://web.pcc.gov.tw/tps/validate/init")
+        
+        # Wait for page to load
+        time.sleep(2)
+        
+        # Check if the page loaded correctly
+        if "驗證碼檢核" not in driver.page_source:
+            print("❌ Test failed: Could not find CAPTCHA on the page.")
+            print("Please check your internet connection or if the website has changed.")
+            return False
+        
+        print("Starting CAPTCHA solving test...")
+        # Keep debug files for this test run
+        success = handle_captcha(driver, keep_debug_files=True)
+        
+        if success:
+            print("\n✅ CAPTCHA test PASSED - Successfully solved the CAPTCHA!")
+        else:
+            print("\n❌ CAPTCHA test FAILED - Could not solve the CAPTCHA.")
+        
+        # Wait a bit to see the result
+        time.sleep(3)
+        
+        return success
+    
+    except Exception as e:
+        print(f"❌ Test failed with error: {str(e)}")
+        print(traceback.format_exc())
+        return False
+    
+    finally:
+        print("Closing browser...")
+        driver.quit()
+
+if __name__ == "__main__":
+    print("=" * 70)
+    print("PCC Taiwan CAPTCHA Solver Test Script")
+    print("=" * 70)
+    print("This script tests the CAPTCHA solver on https://web.pcc.gov.tw/tps/validate/init")
+    print("\nChecking dependencies...")
+    
+    # Check if dependencies are installed
+    if not check_dependencies():
+        sys.exit(1)
+    
+    # Set up directories
+    setup_directories()
+    
+    print("\nStarting test...")
+    result = test_captcha_solver()
+    
+    print("\n" + "=" * 70)
+    if result:
+        print("Test completed successfully!")
+    else:
+        print("Test failed. Check the messages above for details.")
+    print("=" * 70)
+    
+    # Exit with appropriate code
+    sys.exit(0 if result else 1)
