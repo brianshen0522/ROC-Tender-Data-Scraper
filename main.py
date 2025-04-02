@@ -8,6 +8,9 @@ from database import get_db_connection, ensure_connection, setup_database, get_o
 from scraper import setup_selenium_driver, fetch_org_id_from_site, fetch_tender_details, check_page_data_loaded, extract_tender_info
 from captcha_solver import handle_captcha
 
+import sys
+sys.stdout.reconfigure(encoding='utf-8')
+
 # Load environment variables from .env file
 load_dotenv()
 
