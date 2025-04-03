@@ -83,6 +83,7 @@ def setup_database(conn):
         organization_id TEXT,
         tender_no TEXT,
         url TEXT UNIQUE,
+        pk_pms_main TEXT,
         project_name TEXT,
         publication_date DATE,
         deadline DATE,
@@ -200,32 +201,94 @@ def save_tender(conn, tender_data):
     if not conn:
         return False
     
+    # Check for required primary key fields
+    if 'tender_no' not in tender_data or 'organization_id' not in tender_data or 'publication_date' not in tender_data:
+        print("⚠️ Missing primary key fields in tender data. Cannot save.")
+        return False
+    
+    # Check for NULL values in primary key fields
+    if tender_data['tender_no'] is None or tender_data['organization_id'] is None or tender_data['publication_date'] is None:
+        print("⚠️ NULL values in primary key fields. Cannot save.")
+        return False
+    
     try:
         cur = conn.cursor()
         
-        # Build dynamic SQL for insert/update
-        columns = list(tender_data.keys())
-        values = [tender_data[col] for col in columns]
-        placeholders = ["%s"] * len(values)
+        # First check if this record exists
+        cur.execute("""
+            SELECT 1 FROM tenders 
+            WHERE tender_no = %s AND organization_id = %s AND publication_date = %s
+        """, (tender_data['tender_no'], tender_data['organization_id'], tender_data['publication_date']))
         
-        # Create the SET clause for UPDATE
-        # Exclude primary key columns from update clause
-        update_clause = ", ".join([f"{col} = EXCLUDED.{col}" for col in columns 
-                                 if col not in ('tender_no', 'organization_id', 'publication_date')])
+        record_exists = cur.fetchone() is not None
         
-        insert_sql = f"""
-            INSERT INTO tenders ({', '.join(columns)})
-            VALUES ({', '.join(placeholders)})
-            ON CONFLICT (tender_no, organization_id, publication_date) DO UPDATE SET
-                {update_clause};
-        """
+        if record_exists:
+            # DIRECT UPDATE APPROACH - more reliable than ON CONFLICT for complex updates
+            print(f"🔄 Updating existing tender with tender_no={tender_data['tender_no']}")
+            
+            # Build SET clause and parameters for UPDATE
+            set_items = []
+            params = []
+            
+            for col, val in tender_data.items():
+                # Skip primary key columns for the SET clause
+                if col not in ('tender_no', 'organization_id', 'publication_date'):
+                    set_items.append(f"{col} = %s")
+                    params.append(val)
+            
+            # Add WHERE clause parameters
+            params.extend([
+                tender_data['tender_no'],
+                tender_data['organization_id'],
+                tender_data['publication_date']
+            ])
+            
+            # Execute update
+            update_sql = f"""
+                UPDATE tenders 
+                SET {', '.join(set_items)} 
+                WHERE tender_no = %s AND organization_id = %s AND publication_date = %s
+            """
+            
+            cur.execute(update_sql, params)
+            
+        else:
+            # INSERT for new records
+            print(f"➕ Inserting new tender with tender_no={tender_data['tender_no']}")
+            
+            # Build INSERT statement
+            columns = list(tender_data.keys())
+            placeholders = ["%s"] * len(columns)
+            values = [tender_data[col] for col in columns]
+            
+            insert_sql = f"""
+                INSERT INTO tenders ({', '.join(columns)})
+                VALUES ({', '.join(placeholders)})
+            """
+            
+            cur.execute(insert_sql, values)
         
-        cur.execute(insert_sql, values)
+        # Commit and close
         conn.commit()
+        
+        # Verify the update worked
+        verify_sql = """
+            SELECT scrap_status FROM tenders 
+            WHERE tender_no = %s AND organization_id = %s AND publication_date = %s
+        """
+        cur.execute(verify_sql, (
+            tender_data['tender_no'], 
+            tender_data['organization_id'], 
+            tender_data['publication_date']
+        ))
+        result = cur.fetchone()
+        print(f"✅ Verification: tender status is now '{result[0] if result else 'unknown'}'")
+        
         cur.close()
         return True
+        
     except Exception as e:
-        print(f"⚠️ Error inserting/updating tender: {e}")
+        print(f"⚠️ Error saving/updating tender: {e}")
         conn.rollback()
         return False
 
@@ -297,7 +360,16 @@ if __name__ == "__main__":
             """)
             url_unique = cur.fetchone() is not None
             
-            # Check if schema matches expected structure
+            # Check if pk_pms_main column exists
+            cur.execute("""
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_name = 'tenders'
+            AND column_name = 'pk_pms_main';
+            """)
+            pk_pms_main_exists = cur.fetchone() is not None
+            
+            # Check schema matches expected structure
             schema_mismatch = False
             
             # Check organization table schema
@@ -314,6 +386,11 @@ if __name__ == "__main__":
             # Check URL unique constraint
             if not url_unique:
                 print("⚠️ Tenders table schema mismatch: url should have a UNIQUE constraint")
+                schema_mismatch = True
+                
+            # Check pk_pms_main column
+            if not pk_pms_main_exists:
+                print("⚠️ Tenders table schema mismatch: pk_pms_main column is missing")
                 schema_mismatch = True
             
             if schema_mismatch:
@@ -362,15 +439,79 @@ if __name__ == "__main__":
             
             if 'tenders' in existing_tables:
                 print("📤 Importing tenders data from backup...")
-                # Handle potential NULL values in PK columns
+                # Check if pk_pms_main column exists in the backup
                 cur.execute("""
-                INSERT INTO tenders
-                SELECT * FROM tenders_backup
-                WHERE tender_no IS NOT NULL
-                AND organization_id IS NOT NULL
-                AND publication_date IS NOT NULL
-                ON CONFLICT DO NOTHING;
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = 'tenders_backup'
+                AND column_name = 'pk_pms_main';
                 """)
+                backup_has_pk_pms_main = cur.fetchone() is not None
+                
+                if backup_has_pk_pms_main:
+                    # Handle potential NULL values in PK columns
+                    cur.execute("""
+                    INSERT INTO tenders
+                    SELECT * FROM tenders_backup
+                    WHERE tender_no IS NOT NULL
+                    AND organization_id IS NOT NULL
+                    AND publication_date IS NOT NULL
+                    ON CONFLICT DO NOTHING;
+                    """)
+                else:
+                    # Need to handle missing pk_pms_main column in backup
+                    # Get column names from backup table
+                    cur.execute("""
+                    SELECT column_name 
+                    FROM information_schema.columns 
+                    WHERE table_name = 'tenders_backup'
+                    ORDER BY ordinal_position;
+                    """)
+                    backup_columns = [row[0] for row in cur.fetchall()]
+                    
+                    # Get column names from new table
+                    cur.execute("""
+                    SELECT column_name 
+                    FROM information_schema.columns 
+                    WHERE table_name = 'tenders'
+                    ORDER BY ordinal_position;
+                    """)
+                    new_columns = [row[0] for row in cur.fetchall()]
+                    
+                    # Find the position to insert pk_pms_main
+                    url_pos = backup_columns.index('url') if 'url' in backup_columns else -1
+                    
+                    # Prepare columns list - insert pk_pms_main after url
+                    if url_pos >= 0:
+                        columns_before_url = backup_columns[:url_pos+1]
+                        columns_after_url = backup_columns[url_pos+1:]
+                        target_columns = columns_before_url + ['pk_pms_main'] + columns_after_url
+                    else:
+                        target_columns = backup_columns + ['pk_pms_main']
+                    
+                    # Build column list for SELECT and INSERT
+                    select_columns = []
+                    for col in target_columns:
+                        if col == 'pk_pms_main':
+                            select_columns.append("NULL as pk_pms_main")
+                        elif col in backup_columns:
+                            select_columns.append(col)
+                    
+                    # Only use columns that exist in the new table
+                    insert_columns = [col for col in target_columns if col in new_columns]
+                    
+                    # Build and execute the import SQL
+                    import_sql = f"""
+                    INSERT INTO tenders ({', '.join(insert_columns)})
+                    SELECT {', '.join(select_columns)}
+                    FROM tenders_backup
+                    WHERE tender_no IS NOT NULL
+                    AND organization_id IS NOT NULL
+                    AND publication_date IS NOT NULL
+                    ON CONFLICT DO NOTHING;
+                    """
+                    cur.execute(import_sql)
+                
                 cur.execute("SELECT COUNT(*) FROM tenders;")
                 imported_count = cur.fetchone()[0]
                 print(f"✅ Re-imported {imported_count} tender records")
@@ -380,6 +521,18 @@ if __name__ == "__main__":
                 backup_count = cur.fetchone()[0]
                 if imported_count < backup_count:
                     print(f"⚠️ Warning: {backup_count - imported_count} tender records could not be imported due to NULL values in primary key columns")
+                
+                # Update all existing records to have scrap_status='found' if they don't have details
+                cur.execute("""
+                UPDATE tenders
+                SET scrap_status = 'found'
+                WHERE scrap_status IS NULL OR scrap_status = ''
+                OR (scrap_status != 'finished' AND tender_method IS NULL);
+                """)
+                cur.execute("SELECT COUNT(*) FROM tenders WHERE scrap_status = 'found';")
+                found_count = cur.fetchone()[0]
+                print(f"📊 Set {found_count} tenders to 'found' status for detail collection")
+                
         else:
             print("✅ Database tables already exist.")
             

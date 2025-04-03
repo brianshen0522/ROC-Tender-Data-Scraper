@@ -39,31 +39,57 @@ def setup_selenium_driver(headless=False):
     
     return driver
 
-def fetch_org_id_from_site(driver, org_name):
-    """Open new tab and fetch organization site ID"""
+def fetch_org_id_from_site(driver, org_name, max_retries=5):
+    """Open new tab and fetch organization site ID with retry mechanism"""
     main_window = driver.current_window_handle
     driver.execute_script("window.open('');")
     driver.switch_to.window(driver.window_handles[-1])
-    driver.get("https://web.pcc.gov.tw/prkms/tender/common/orgName/search")
-
-    # Handle CAPTCHA check
-    handle_captcha(driver, False)
-
-    try:
-        search_input = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.XPATH, '/html/body/div/div[2]/div/div[2]/div/form/table/tbody/tr/td[1]/input'))
-        )
-        search_input.send_keys(org_name)
-        form = driver.find_element(By.XPATH, '/html/body/div/div[2]/div/div[2]/div/form')
-        driver.execute_script("arguments[0].submit();", form)
-        org_id_cell = WebDriverWait(driver, 10).until(
-            EC.presence_of_element_located((By.XPATH, '/html/body/div/div[2]/div/div[2]/div/table/tbody/tr[2]/td[1]'))
-        )
-        org_id = org_id_cell.text.strip()
-    except Exception as e:
-        print(f"⚠️ Failed to fetch org ID for '{org_name}':", e)
-        org_id = None
-
+    
+    org_id = None
+    retry_count = 0
+    
+    while retry_count < max_retries:
+        try:
+            # Load the organization search page
+            driver.get("https://web.pcc.gov.tw/prkms/tender/common/orgName/search")
+            
+            # Handle CAPTCHA check
+            handle_captcha(driver, False)
+            
+            # Wait for search input to be available
+            search_input = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.XPATH, '/html/body/div/div[2]/div/div[2]/div/form/table/tbody/tr/td[1]/input'))
+            )
+            
+            # Enter organization name and submit form
+            search_input.clear()  # Clear any existing text
+            search_input.send_keys(org_name)
+            form = driver.find_element(By.XPATH, '/html/body/div/div[2]/div/div[2]/div/form')
+            driver.execute_script("arguments[0].submit();", form)
+            
+            # Wait for results and get org ID
+            org_id_cell = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.XPATH, '/html/body/div/div[2]/div/div[2]/div/table/tbody/tr[2]/td[1]'))
+            )
+            org_id = org_id_cell.text.strip()
+            
+            # If we successfully got the org ID, break the loop
+            if org_id:
+                print(f"✅ Found organization ID on attempt {retry_count + 1}/{max_retries}")
+                break
+                
+        except Exception as e:
+            # Increment retry counter
+            retry_count += 1
+            
+            if retry_count < max_retries:
+                print(f"⚠️ Failed to find organization ID on attempt {retry_count}/{max_retries}: {e}")
+                print(f"🔄 Reloading page and trying again...")
+                time.sleep(2)  # Add a short delay before retrying
+            else:
+                print(f"❌ Failed to fetch org ID for '{org_name}' after {max_retries} attempts: {e}")
+    
+    # Close the tab and switch back to main window
     driver.close()
     driver.switch_to.window(main_window)
     return org_id

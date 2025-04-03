@@ -1,6 +1,6 @@
 import asyncio
 from textual.app import App, ComposeResult
-from textual.widgets import Input, Button, Checkbox, Label, Log
+from textual.widgets import Input, Button, Checkbox, Label, Log, Select
 from textual.containers import Vertical, Horizontal
 import os
 
@@ -48,6 +48,10 @@ class ScraperTUI(App):
         border: round $accent;
         overflow: auto;
     }
+    Select {
+        width: 100%;
+        margin-bottom: 1;
+    }
     """
 
     def __init__(self, **kwargs):
@@ -65,6 +69,17 @@ class ScraperTUI(App):
                     yield Input(placeholder="Query Sentence (default: 案)", id="query")
                     yield Input(placeholder="Time Range (ROC Year, default: 113)", id="time_range")
                     yield Input(placeholder="Page Size (default: 100)", id="page_size")
+                    
+                    # Add phase selection dropdown
+                    yield Select(
+                        [(("Both Phases", "both")), 
+                         (("Discovery Only", "discovery")), 
+                         (("Detail Only", "detail"))],
+                        id="phase_select",
+                        value="both",
+                        prompt="Select Scraping Phase"
+                    )
+                    
                     yield Checkbox(label="Headless Mode", id="headless")
                     yield Checkbox(label="Keep Debug Files", id="keep_debug")
                 with Horizontal(id="buttons"):
@@ -112,12 +127,14 @@ class ScraperTUI(App):
                 page_size = self.query_one("#page_size", Input).value.strip() or "100"
                 headless = self.query_one("#headless", Checkbox).value
                 keep_debug = self.query_one("#keep_debug", Checkbox).value
+                phase = self.query_one("#phase_select", Select).value
 
                 cmd = [
                     "python", "-u", "main.py",
                     "--query", query,
                     "--time", time_range,
                     "--size", page_size,
+                    "--phase", phase
                 ]
                 if headless:
                     cmd.append("--headless")
@@ -125,7 +142,7 @@ class ScraperTUI(App):
                     cmd.append("--keep-debug")
 
                 log_widget.clear()
-                log_widget.write("Starting scraper...\n")
+                log_widget.write(f"Starting scraper (Phase: {phase})...\n")
                 run_button.label = "End Scraper"
                 quit_button.disabled = True   # Disable Quit while scraper is running
                 self.running = True

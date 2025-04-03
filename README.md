@@ -20,7 +20,7 @@ A web scraper for collecting tender data from a Taiwanese government procurement
 ## Setup
 
 1. Install the required dependencies:
-   ```
+   ```bash
    pip install -r requirements.txt
    ```
 
@@ -44,26 +44,27 @@ A web scraper for collecting tender data from a Taiwanese government procurement
 ### Running the TUI
 
 The project includes a Textual-based TUI for an interactive experience. To launch the TUI:
-```
+```bash
 python tui.py
 ```
 
 The TUI allows you to:
 - Enter scraper parameters (query, time range, page size, etc.)
 - Enable or disable headless mode and debug file retention
+- Select which phase(s) of the scraper to run (discovery, detail, or both)
 - View real-time logs of the scraping process
 - Start and stop the scraper interactively
 
 ### Running the Scraper Directly
 
 Run the scraper with default settings from the `.env` file:
-```
+```bash
 python main.py
 ```
 
 Or specify command-line arguments to override the defaults:
-```
-python main.py --query "關鍵字" --time "113" --size 50 --headless
+```bash
+python main.py --query "關鍵字" --time "113" --size 50 --headless --phase both
 ```
 
 ### Command Line Arguments
@@ -73,6 +74,7 @@ python main.py --query "關鍵字" --time "113" --size 50 --headless
 - `--size`: Page size for results (default: from `.env` or 100, max: 100)
 - `--headless`: Run browser in headless mode (default: off)
 - `--keep-debug`: Keep debug images after CAPTCHA solving (default: off)
+- `--phase`: Run only the discovery phase, only the detail phase, or both (default: both)
 
 ## Features
 
@@ -94,11 +96,12 @@ The scraper stores data in two PostgreSQL tables:
 2. **tenders**: Stores tender information
    - `organization_id` (TEXT, FOREIGN KEY): Reference to organizations table
    - `tender_no` (TEXT): Tender number
-   - `url` (TEXT, PRIMARY KEY): URL of the tender
+   - `url` (TEXT, UNIQUE): URL of the tender
    - `project_name` (TEXT): Name of the tender project
    - `publication_date` (DATE): Publication date
    - `deadline` (DATE): Tender deadline
-   - `scrap_status` (TEXT): Status of scraping ('finished', 'failed')
+   - `scrap_status` (TEXT): Status of scraping ('found', 'finished', 'failed')
+   - `pk_pms_main` (TEXT): Unique identifier for fetching tender details
    - ... (many more fields from the tender details)
 
 ## Notes
@@ -106,3 +109,6 @@ The scraper stores data in two PostgreSQL tables:
 - The CAPTCHA solving functionality uses OpenCV and image processing techniques.
 - Browser automation is handled by Selenium with Chrome WebDriver.
 - The TUI is built using the Textual framework for a modern terminal-based interface.
+- The scraper uses a two-phase approach:
+  1. **Discovery Phase**: Finds tenders and saves basic information.
+  2. **Detail Phase**: Fetches detailed information for tenders with a "found" status.
