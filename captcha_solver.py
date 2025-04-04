@@ -1,5 +1,3 @@
-# test_captcha_solver.py - Standalone test script for PCC Taiwan CAPTCHA solver
-
 import os
 import sys
 import time
@@ -11,6 +9,7 @@ from contextlib import contextmanager
 import glob
 import io
 from PIL import Image
+import concurrent.futures
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -161,6 +160,39 @@ def calculate_overlap_ratio(image1, image2):
         print(traceback.format_exc())
         return 0.0
 
+# Process a single card using multi-threading
+def process_card(index, xpath, driver, left_half, right_half):
+    """Process a single card image and calculate overlap ratios with templates"""
+    try:
+        card_element = WebDriverWait(driver, 10).until(
+            EC.visibility_of_element_located((By.XPATH, xpath))
+        )
+        
+        card_image = capture_image_from_element(driver, xpath)
+        cv2.imwrite(f'debug_images/card_{index+1}.png', card_image)
+        
+        # Calculate overlap ratios
+        left_ratio = calculate_overlap_ratio(left_half, card_image)
+        right_ratio = calculate_overlap_ratio(right_half, card_image)
+        
+        print(f"Card {index+1}: Left ratio: {left_ratio:.3f}, Right ratio: {right_ratio:.3f}")
+        
+        return {
+            'index': index,
+            'element': card_element,
+            'left_ratio': left_ratio,
+            'right_ratio': right_ratio
+        }
+    except Exception as e:
+        print(f"Error processing card {index+1}: {str(e)}")
+        print(traceback.format_exc())
+        return {
+            'index': index,
+            'element': None,
+            'left_ratio': 0.0,
+            'right_ratio': 0.0
+        }
+
 def solve_card_captcha(driver, attempt=1, max_attempts=10):
     """Solve the card CAPTCHA by using overlap ratio to match patterns between areas A and B"""
     # Only log attempt when retrying
@@ -202,29 +234,34 @@ def solve_card_captcha(driver, attempt=1, max_attempts=10):
             "/html/body/div/div[2]/div/div/div[3]/div/div[4]/form/table[1]/tbody/tr[2]/td/table/tbody/tr/td[2]/table/tbody/tr/td[6]/label/img"
         ]
         
-        # Create lists to store overlap ratios for each card with left and right templates
-        card_elements = []
-        left_overlap_ratios = []
-        right_overlap_ratios = []
+        # Use multi-threading to process the cards in parallel
+        print("Processing cards using multi-threading...")
+        card_results = []
         
-        # Analyze each card in area B
-        for i, xpath in enumerate(card_xpaths):
-            card_element = WebDriverWait(driver, 10).until(
-                EC.visibility_of_element_located((By.XPATH, xpath))
-            )
+        # Create a ThreadPoolExecutor to run the processing in parallel
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as executor:
+            # Submit tasks for each card
+            future_to_card = {
+                executor.submit(process_card, idx, xpath, driver, left_half, right_half): idx
+                for idx, xpath in enumerate(card_xpaths)
+            }
             
-            card_elements.append(card_element)
-            card_image = capture_image_from_element(driver, xpath)
-            cv2.imwrite(f'debug_images/card_{i+1}.png', card_image)
-            
-            # Calculate overlap ratios
-            left_ratio = calculate_overlap_ratio(left_half, card_image)
-            right_ratio = calculate_overlap_ratio(right_half, card_image)
-            
-            left_overlap_ratios.append(left_ratio)
-            right_overlap_ratios.append(right_ratio)
-            
-            print(f"Card {i+1}: Left ratio: {left_ratio:.3f}, Right ratio: {right_ratio:.3f}")
+            # Collect results as they complete
+            for future in concurrent.futures.as_completed(future_to_card):
+                card_idx = future_to_card[future]
+                try:
+                    result = future.result()
+                    card_results.append(result)
+                except Exception as e:
+                    print(f"Card {card_idx+1} processing failed: {str(e)}")
+        
+        # Sort results by index to maintain order
+        card_results.sort(key=lambda x: x['index'])
+        
+        # Extract the elements and ratios
+        card_elements = [result['element'] for result in card_results if result['element'] is not None]
+        left_overlap_ratios = [result['left_ratio'] for result in card_results]
+        right_overlap_ratios = [result['right_ratio'] for result in card_results]
         
         # Find the best matches based on overlap ratios
         best_left_match_idx = left_overlap_ratios.index(max(left_overlap_ratios))
@@ -238,6 +275,14 @@ def solve_card_captcha(driver, attempt=1, max_attempts=10):
             best_right_match_idx = temp_right_ratios.index(max(temp_right_ratios))
         
         print(f"Best matches: Left -> Card {best_left_match_idx+1}, Right -> Card {best_right_match_idx+1}")
+        
+        # If no valid elements were found, retry
+        if not card_elements or len(card_elements) < 6:
+            print("❌ Not all card elements were found. Retrying...")
+            if attempt < max_attempts:
+                return solve_card_captcha(driver, attempt + 1, max_attempts)
+            else:
+                return False
         
         # Click the matching cards
         card_elements[best_left_match_idx].click()
@@ -371,6 +416,15 @@ def check_dependencies():
         missing_deps.append("numpy")
         print("✗ NumPy is not installed")
     
+    try:
+        import concurrent.futures
+        print("✓ concurrent.futures is installed")
+    except ImportError:
+        # concurrent.futures is included in Python 3.2+, but check anyway
+        print("✗ concurrent.futures module not available")
+        print("This script requires Python 3.2+ for threading support")
+        return False
+    
     if missing_deps:
         print("\n❌ Missing dependencies. Please install them with:")
         print(f"pip install {' '.join(missing_deps)}")
@@ -434,7 +488,7 @@ def test_captcha_solver():
 
 if __name__ == "__main__":
     print("=" * 70)
-    print("PCC Taiwan CAPTCHA Solver Test Script")
+    print("PCC Taiwan CAPTCHA Solver Test Script (Multi-threaded Version)")
     print("=" * 70)
     print("This script tests the CAPTCHA solver on https://web.pcc.gov.tw/tps/validate/init")
     print("\nChecking dependencies...")
