@@ -1,3 +1,4 @@
+import concurrent.futures
 import os
 import time
 import argparse
@@ -14,10 +15,98 @@ sys.stdout.reconfigure(encoding='utf-8')
 # Load environment variables from .env file
 load_dotenv()
 
-def discovery_phase(driver, conn, query_sentence, time_range, page_size, keep_debug_files, headless=False):
-    """Phase 1: Find all tenders and save basic information with 'found' status"""
+def process_tender_row(row_index, row, org_site_id_cache, conn_params):
+    """Process a single tender row with its own database connection"""
+    # Create a new database connection for this thread
+    try:
+        conn = get_db_connection()
+        if not conn:
+            print(f"❌ Thread {row_index}: Database connection failed.")
+            return {'success': False, 'message': 'Database connection failed'}
+        
+        # Extract tender info from the row
+        tender_info = extract_tender_info(row)
+        if not tender_info:
+            conn.close()
+            return {'success': False, 'message': 'Could not extract tender info'}
+        
+        org_name = tender_info["org_name"]
+        tender_no = tender_info["tender_no"]
+        project_name = tender_info["project_name"]
+        detail_link = tender_info["detail_link"]
+        pk_pms_main = tender_info["pk_pms_main"]
+        pub_date = tender_info["pub_date"]  # This is in ROC format
+        deadline = tender_info["deadline"]  # This is in ROC format
+        
+        # Skip tenders without publication date (required for primary key)
+        if pub_date is None or (isinstance(pub_date, str) and pub_date.strip() == ''):
+            conn.close()
+            return {'success': False, 'message': f'Skipping tender - missing or empty publication date', 'tender_no': tender_no}
+        
+        # Check if organization is in the cache first
+        org_site_id = None
+        if org_name in org_site_id_cache:
+            org_site_id = org_site_id_cache[org_name]
+        else:
+            # Check if organization exists in DB
+            org_site_id = get_organization_id(conn, org_name)
+            # Only cache valid org_site_ids
+            if org_site_id:
+                org_site_id_cache[org_name] = org_site_id
+        
+        # If we don't have an org_site_id, this needs to be processed in the main thread
+        if not org_site_id:
+            conn.close()
+            return {
+                'success': False, 
+                'message': 'Organization site ID not found in DB', 
+                'tender_no': tender_no,
+                'org_name': org_name,
+                'need_org_id': True,
+                'tender_info': tender_info
+            }
+        
+        # Check if this tender already exists with a "finished" status
+        existing_status = check_tender_status(conn, detail_link)
+        if existing_status == "finished":
+            conn.close()
+            return {'success': True, 'message': f'Skipping tender - already processed completely', 'tender_no': tender_no, 'status': 'skipped'}
+        
+        # Prepare basic data for initial insertion
+        basic_data = {
+            "organization_id": org_site_id,
+            "tender_no": tender_no,
+            "project_name": project_name,
+            "publication_date": pub_date,
+            "deadline": deadline,
+            "url": detail_link,
+            "pk_pms_main": pk_pms_main,
+            "scrap_status": "found",
+            "org_name": org_name
+        }
+        
+        # Save tender data to database
+        if save_tender(conn, basic_data):
+            status = 'new' if existing_status != 'found' else 'updated'
+            conn.close()
+            return {'success': True, 'message': f'Saved basic tender info', 'tender_no': tender_no, 'status': status}
+        else:
+            conn.close()
+            return {'success': False, 'message': f'Failed to save basic tender info', 'tender_no': tender_no}
+        
+    except Exception as e:
+        if 'conn' in locals() and conn:
+            try:
+                conn.rollback()
+                conn.close()
+            except:
+                pass
+        return {'success': False, 'message': f'Error processing row: {str(e)}', 'error': str(e)}
+
+def discovery_phase(driver, conn, query_sentence, time_range, page_size, keep_debug_files, headless=False, max_workers=10):
+    """Phase 1: Find all tenders and save basic information with 'found' status using multi-threading"""
     print("\n" + "="*70)
-    print("PHASE 1: TENDER DISCOVERY")
+    print("PHASE 1: TENDER DISCOVERY (MULTI-THREADED)")
     print("="*70)
     
     # Construct the base URL with the provided parameters
@@ -28,6 +117,18 @@ def discovery_phase(driver, conn, query_sentence, time_range, page_size, keep_de
     current_page = 1
     more_pages = True
     tender_count = 0
+    
+    # Create a cache for organization site IDs to reduce DB lookups
+    org_site_id_cache = {}
+    
+    # Get connection parameters for threads
+    conn_params = {
+        "dbname": os.getenv("DB_NAME"),
+        "user": os.getenv("DB_USER"),
+        "password": os.getenv("DB_PASSWORD"),
+        "host": os.getenv("DB_HOST"),
+        "port": os.getenv("DB_PORT")
+    }
     
     try:
         while more_pages:
@@ -45,110 +146,133 @@ def discovery_phase(driver, conn, query_sentence, time_range, page_size, keep_de
             # Handle CAPTCHA if present
             handle_captcha(driver, keep_debug_files)
 
-            # Check if data is loaded correctly - now returns potentially updated driver
-            # and a flag indicating whether to advance page
+            # Check if data is loaded correctly
             rows, more_pages, driver, advance_page = check_page_data_loaded(
                 driver, 
                 page_size, 
-                base_url,           # Base URL for initial search
-                current_url,        # Current paginated URL
-                query_sentence,     # Query parameters for establishing a new session
-                time_range,         # Time range for search
+                base_url,
+                current_url,
+                query_sentence,
+                time_range,
                 headless
             )
             
-            # Process tender rows
-            for row_index, row in enumerate(rows):
-                try:
-                    # Ensure database connection is active
-                    conn = ensure_connection(conn)
-                    if not conn:
-                        print("❌ Database connection failed. Exiting.")
-                        return tender_count, driver
-                    
-                    # Extract tender info from the row
-                    tender_info = extract_tender_info(row)
-                    if not tender_info:
-                        continue
-                    
-                    org_name = tender_info["org_name"]
-                    tender_no = tender_info["tender_no"]
-                    project_name = tender_info["project_name"]
-                    detail_link = tender_info["detail_link"]
-                    pk_pms_main = tender_info["pk_pms_main"]
-                    pub_date = tender_info["pub_date"]  # This is now in ROC format
-                    deadline = tender_info["deadline"]  # This is now in ROC format
-                    
-                    # Skip tenders without publication date (required for primary key)
-                    if pub_date is None:
-                        print(f"⚠️ Skipping tender '{tender_no}' - missing publication date")
-                        continue
-                    elif isinstance(pub_date, str) and pub_date.strip() == '':
-                        print(f"⚠️ Skipping tender '{tender_no}' - empty publication date")
-                        continue
-                    
-                    print(f"Discovering tender {row_index+1}/{len(rows)}: '{tender_no}'")
-                    
-                    # Check if organization exists in DB
-                    org_site_id = get_organization_id(conn, org_name)
-                    if not org_site_id:
-                        org_site_id = fetch_org_id_from_site(driver, org_name)
-                        print(f"🏢 Got org site ID for '{org_name}': {org_site_id}")
-                        if org_site_id:
-                            save_organization(conn, org_site_id, org_name)
-                        else:
-                            print(f"⚠️ Skipping tender — site ID not found for org: {org_name}")
-                            continue
-                    
-                    # Check if this tender already exists with a "finished" status
-                    existing_status = check_tender_status(conn, detail_link)
-                    if existing_status == "finished":
-                        print(f"✅ Skipping tender '{tender_no}' - already processed completely")
-                        continue
-                    elif existing_status == "found":
-                        print(f"📋 Tender '{tender_no}' already discovered, keeping 'found' status")
-                    else:
-                        print(f"🆕 New tender: '{tender_no}' from org '{org_site_id}'")
-                        tender_count += 1
-                    
-                    # Prepare basic data for initial insertion
-                    basic_data = {
-                        "organization_id": org_site_id,
-                        "tender_no": tender_no,
-                        "project_name": project_name,
-                        "publication_date": pub_date,  # Use the ROC date string
-                        "deadline": deadline,          # Use the ROC date string
-                        "url": detail_link,
-                        "pk_pms_main": pk_pms_main,  # Store this for later detail fetch
-                        "scrap_status": "found",
-                        "org_name": org_name
-                    }
-                    
-                    # Save tender data to database
-                    if save_tender(conn, basic_data):
-                        print(f"💾 Saved basic tender info for '{tender_no}'")
-                    else:
-                        print(f"⚠️ Failed to save basic tender info for '{tender_no}'")
+            # Skip if no rows found
+            if not rows:
+                print("⚠️ No tender rows found on this page")
+                if advance_page:
+                    current_page += 1
+                continue
                 
-                except Exception as e:
-                    print(f"⚠️ Error processing row: {e}")
-                    # Try to roll back and refresh connection in case it was in a failed transaction
+            print(f"Found {len(rows)} tenders on this page - processing with multi-threading")
+            
+            # Process tender rows using multi-threading
+            successful_tenders = 0
+            skipped_tenders = 0
+            failed_tenders = 0
+            
+            # List to store tasks that need organization ID fetching
+            needs_org_id = []
+            
+            # Use ThreadPoolExecutor to process rows in parallel
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Submit all tasks
+                future_to_row = {
+                    executor.submit(process_tender_row, idx, row, org_site_id_cache, conn_params): idx
+                    for idx, row in enumerate(rows)
+                }
+                
+                # Process results as they complete
+                for future in concurrent.futures.as_completed(future_to_row):
+                    row_idx = future_to_row[future]
                     try:
-                        if conn:
-                            conn.rollback()
-                        conn = ensure_connection(conn)
-                    except Exception as e2:
-                        print(f"⚠️ Error recovering from row processing error: {e2}")
-                    continue
+                        result = future.result()
+                        
+                        # Handle results
+                        if result.get('success'):
+                            if result.get('status') == 'skipped':
+                                print(f"✅ [{row_idx+1}/{len(rows)}] {result.get('message')} '{result.get('tender_no')}'")
+                                skipped_tenders += 1
+                            else:
+                                print(f"💾 [{row_idx+1}/{len(rows)}] {result.get('message')} for '{result.get('tender_no')}'")
+                                successful_tenders += 1
+                                if result.get('status') == 'new':
+                                    tender_count += 1
+                        else:
+                            if result.get('need_org_id'):
+                                # Save for processing in the main thread
+                                needs_org_id.append(result)
+                            else:
+                                print(f"⚠️ [{row_idx+1}/{len(rows)}] {result.get('message')} for '{result.get('tender_no', 'unknown')}'")
+                                failed_tenders += 1
+                    except Exception as e:
+                        print(f"⚠️ Error processing result for row {row_idx+1}: {str(e)}")
+                        failed_tenders += 1
+            
+            # Process tenders that need organization IDs (can't be done in threads)
+            if needs_org_id:
+                print(f"🔄 Processing {len(needs_org_id)} tenders that need organization IDs...")
+                
+                # Ensure main connection is active
+                conn = ensure_connection(conn)
+                if not conn:
+                    print("❌ Database connection failed. Exiting.")
+                    return tender_count, driver
+                
+                for result in needs_org_id:
+                    try:
+                        org_name = result['org_name']
+                        tender_info = result['tender_info']
+                        tender_no = tender_info["tender_no"]
+                        
+                        print(f"🏢 Fetching site ID for org: '{org_name}'")
+                        org_site_id = fetch_org_id_from_site(driver, org_name)
+                        
+                        if org_site_id:
+                            print(f"🏢 Got org site ID for '{org_name}': {org_site_id}")
+                            # Cache the org_site_id for future use
+                            org_site_id_cache[org_name] = org_site_id
+                            
+                            # Save organization to DB
+                            save_organization(conn, org_site_id, org_name)
+                            
+                            # Prepare basic data
+                            basic_data = {
+                                "organization_id": org_site_id,
+                                "tender_no": tender_no,
+                                "project_name": tender_info["project_name"],
+                                "publication_date": tender_info["pub_date"],
+                                "deadline": tender_info["deadline"],
+                                "url": tender_info["detail_link"],
+                                "pk_pms_main": tender_info["pk_pms_main"],
+                                "scrap_status": "found",
+                                "org_name": org_name
+                            }
+                            
+                            # Save tender data
+                            if save_tender(conn, basic_data):
+                                print(f"💾 Saved basic tender info for '{tender_no}'")
+                                successful_tenders += 1
+                                tender_count += 1
+                            else:
+                                print(f"⚠️ Failed to save basic tender info for '{tender_no}'")
+                                failed_tenders += 1
+                        else:
+                            print(f"⚠️ Skipping tender - site ID not found for org: {org_name}")
+                            failed_tenders += 1
+                    except Exception as e:
+                        print(f"⚠️ Error processing organization ID: {e}")
+                        failed_tenders += 1
+            
+            # Print summary for this page
+            print(f"📊 Page {current_page} summary: {successful_tenders} saved, {skipped_tenders} skipped, {failed_tenders} failed")
             
             # Check if we should advance to the next page
             if advance_page:
-                # Move to the next page
                 current_page += 1
                 print(f"✅ Advancing to page {current_page}")
             else:
                 print(f"🔄 Staying on page {current_page} for retry with fresh browser")
-                # Give a short pause before trying again with the fresh browser
                 time.sleep(2)
             
             # Add a short delay before loading the next page
