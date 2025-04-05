@@ -40,7 +40,7 @@ class ScraperTUI(App):
         align: left middle;
         margin-top: 1;
     }
-    #quit_button {
+    #quit_button, #check_db_button {
         margin-left: 1;
     }
     #log {
@@ -59,6 +59,7 @@ class ScraperTUI(App):
         self.scraper_proc = None      # Holds the running subprocess
         self.scraper_task = None      # Holds the background task running the scraper
         self.running = False          # Tracks if the scraper is currently running
+        self.db_task = None           # Holds the background task for database check
 
     def compose(self) -> ComposeResult:
         with Horizontal(id="container"):
@@ -84,11 +85,12 @@ class ScraperTUI(App):
                     yield Checkbox(label="Keep Debug Files", id="keep_debug")
                 with Horizontal(id="buttons"):
                     yield Button("Run Scraper", id="run_button")
+                    yield Button("Check DB", id="check_db_button")
                     yield Button("Quit", id="quit_button")
             with Vertical(id="right_panel"):
                 yield Log(id="log")
 
-    async def run_scraper_task(self, cmd, log_widget, run_button, quit_button):
+    async def run_scraper_task(self, cmd, log_widget, run_button, quit_button, check_db_button):
         # Start the scraper process with unbuffered output (-u flag)
         self.scraper_proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -111,14 +113,47 @@ class ScraperTUI(App):
         log_widget.write("\nScraping finished.\n")
         run_button.label = "Run Scraper"
         quit_button.disabled = False
+        check_db_button.disabled = False
         self.running = False
         self.scraper_proc = None
         self.scraper_task = None
 
+    async def check_database_task(self, log_widget, run_button, quit_button, check_db_button):
+        # Run the database check command with environment variable to handle Unicode properly
+        env = os.environ.copy()
+        env["PYTHONIOENCODING"] = "utf-8"
+        
+        db_proc = await asyncio.create_subprocess_exec(
+            "python", "-m", "src.database.database",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+            env=env
+        )
+        log_widget.write("Database check started.\n")
+        try:
+            while True:
+                line = await db_proc.stdout.readline()
+                if not line:
+                    break
+                decoded_line = line.decode("utf-8")
+                log_widget.write(decoded_line)
+        except asyncio.CancelledError:
+            if db_proc.returncode is None:
+                db_proc.kill()
+            raise
+        await db_proc.wait()
+        log_widget.write("\nDatabase check finished.\n")
+        run_button.disabled = False
+        quit_button.disabled = False
+        check_db_button.disabled = False
+        self.db_task = None
+
     async def on_button_pressed(self, event: Button.Pressed) -> None:
         run_button = self.query_one("#run_button", Button)
         quit_button = self.query_one("#quit_button", Button)
+        check_db_button = self.query_one("#check_db_button", Button)
         log_widget = self.query_one("#log", Log)
+        
         if event.button.id == "run_button":
             if not self.running:
                 # Gather parameters and prepare command-line arguments for main.py
@@ -130,7 +165,7 @@ class ScraperTUI(App):
                 phase = self.query_one("#phase_select", Select).value
 
                 cmd = [
-                    "python", "-u", "main.py",
+                    "python", "-m", "src.main",
                     "--query", query,
                     "--time", time_range,
                     "--size", page_size,
@@ -145,9 +180,10 @@ class ScraperTUI(App):
                 log_widget.write(f"Starting scraper (Phase: {phase})...\n")
                 run_button.label = "End Scraper"
                 quit_button.disabled = True   # Disable Quit while scraper is running
+                check_db_button.disabled = True  # Disable DB Check while scraper is running
                 self.running = True
                 self.scraper_task = asyncio.create_task(
-                    self.run_scraper_task(cmd, log_widget, run_button, quit_button)
+                    self.run_scraper_task(cmd, log_widget, run_button, quit_button, check_db_button)
                 )
             else:
                 # Terminate the scraper without quitting the UI
@@ -158,7 +194,20 @@ class ScraperTUI(App):
                     self.scraper_task.cancel()
                 run_button.label = "Run Scraper"
                 quit_button.disabled = False
+                check_db_button.disabled = False
                 self.running = False
+
+        elif event.button.id == "check_db_button":
+            # Check if we're already running a database check
+            if self.db_task is None:
+                log_widget.clear()
+                log_widget.write("Starting database check...\n")
+                run_button.disabled = True
+                quit_button.disabled = True
+                check_db_button.disabled = True
+                self.db_task = asyncio.create_task(
+                    self.check_database_task(log_widget, run_button, quit_button, check_db_button)
+                )
 
         elif event.button.id == "quit_button":
             self.exit()

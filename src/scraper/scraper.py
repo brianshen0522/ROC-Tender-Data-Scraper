@@ -6,8 +6,8 @@ from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
-from captcha_solver import handle_captcha
-from utils import parse_roc_date
+from .captcha_solver import handle_captcha
+from ..utils.utils import parse_roc_date
 
 def setup_selenium_driver(headless=False):
     """Set up and return a configured Selenium WebDriver with logs disabled."""

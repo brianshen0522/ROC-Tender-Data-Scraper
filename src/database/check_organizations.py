@@ -1,27 +1,7 @@
 #!/usr/bin/env python3
 import os
 import json
-import psycopg2
-from dotenv import load_dotenv
-
-# Load environment variables from .env file
-load_dotenv()
-
-def get_db_connection():
-    """Create and return a new database connection using environment variables"""
-    try:
-        conn = psycopg2.connect(
-            dbname=os.getenv("DB_NAME"),
-            user=os.getenv("DB_USER"),
-            password=os.getenv("DB_PASSWORD"),
-            host=os.getenv("DB_HOST"),
-            port=os.getenv("DB_PORT")
-        )
-        print("✅ Database connection established")
-        return conn
-    except Exception as e:
-        print(f"⚠️ Database connection error: {e}")
-        return None
+from .database import get_db_connection, ensure_connection, save_organization
 
 def load_json_data(json_path):
     """Load organization data from JSON file"""
@@ -48,6 +28,12 @@ def check_organizations(conn, json_data):
         return False
     
     try:
+        # Ensure the connection is alive
+        conn = ensure_connection(conn)
+        if not conn:
+            print("❌ Database connection lost. Cannot proceed.")
+            return False
+            
         cur = conn.cursor()
         
         # Get all existing organization records from database
@@ -129,6 +115,12 @@ def import_missing_organizations(conn, json_data):
         return False
     
     try:
+        # Ensure the connection is alive
+        conn = ensure_connection(conn)
+        if not conn:
+            print("❌ Database connection lost. Cannot proceed.")
+            return False
+            
         cur = conn.cursor()
         
         # Get existing organization IDs from database
@@ -145,19 +137,18 @@ def import_missing_organizations(conn, json_data):
         
         print(f"📥 Importing {len(missing_orgs)} missing organizations...")
         
-        # Insert missing organizations
+        # Insert missing organizations using the save_organization function
+        success_count = 0
         for site_id, name in missing_orgs:
-            cur.execute(
-                "INSERT INTO organizations (site_id, name) VALUES (%s, %s) ON CONFLICT (site_id) DO NOTHING",
-                (site_id, name)
-            )
+            if save_organization(conn, site_id, name):
+                success_count += 1
+            else:
+                print(f"⚠️ Failed to import organization: {site_id} - {name}")
         
-        conn.commit()
-        print(f"✅ Successfully imported {len(missing_orgs)} organizations into the database.")
+        print(f"✅ Successfully imported {success_count} organizations into the database.")
         return True
         
     except Exception as e:
-        conn.rollback()
         print(f"❌ Error importing organizations: {e}")
         return False
 
@@ -167,9 +158,9 @@ def main():
     print("=" * 70)
     
     # Define JSON file path
-    json_path = "./data/organizations.json"
+    json_path = "../../data/organizations.json"
     
-    # Connect to database
+    # Connect to database using the function from database.py
     conn = get_db_connection()
     if not conn:
         print("❌ Cannot proceed without database connection. Exiting.")

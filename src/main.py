@@ -4,10 +4,10 @@ import time
 import argparse
 from dotenv import load_dotenv
 
-from utils import setup_debug_directory
-from database import get_db_connection, ensure_connection, setup_database, get_organization_id, save_organization, check_tender_status, save_tender
-from scraper import setup_selenium_driver, fetch_org_id_from_site, fetch_tender_details, check_page_data_loaded, extract_tender_info
-from captcha_solver import handle_captcha
+from .database.database import get_db_connection, ensure_connection, setup_database, get_organization_id, save_organization, check_tender_status, save_tender
+from .scraper.scraper import setup_selenium_driver, fetch_org_id_from_site, fetch_tender_details, check_page_data_loaded, extract_tender_info
+from .scraper.captcha_solver import handle_captcha
+from .utils.utils import setup_debug_directory
 
 import sys
 sys.stdout.reconfigure(encoding='utf-8')

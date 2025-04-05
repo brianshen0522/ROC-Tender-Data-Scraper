@@ -1,7 +1,8 @@
 import os
+import json
 import psycopg2
 from dotenv import load_dotenv
-from utils import convert_to_roc_date, parse_roc_date
+from ..utils.utils import convert_to_roc_date, parse_roc_date
 from datetime import datetime
 
 # Load environment variables from .env file
@@ -527,6 +528,86 @@ def migrate_dates_to_roc_format(conn):
         conn.rollback()
         return False
 
+# New function to load JSON data for categories
+def load_categories_json(json_path):
+    """Load tender category data from JSON file"""
+    try:
+        if not os.path.exists(json_path):
+            print(f"❌ JSON file not found at: {json_path}")
+            return None
+            
+        with open(json_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        print(f"✅ Loaded {len(data)} tender categories from JSON file")
+        return data
+    except json.JSONDecodeError:
+        print(f"❌ Invalid JSON format in file: {json_path}")
+        return None
+    except Exception as e:
+        print(f"❌ Error loading JSON data: {e}")
+        return None
+
+# New function to load JSON data for organizations
+def load_organizations_json(json_path):
+    """Load organization data from JSON file"""
+    try:
+        if not os.path.exists(json_path):
+            print(f"❌ JSON file not found at: {json_path}")
+            return None
+            
+        with open(json_path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+        
+        print(f"✅ Loaded {len(data)} organizations from JSON file")
+        return data
+    except json.JSONDecodeError:
+        print(f"❌ Invalid JSON format in file: {json_path}")
+        return None
+    except Exception as e:
+        print(f"❌ Error loading JSON data: {e}")
+        return None
+
+# New function to import categories from JSON file
+def import_categories_from_json(conn, json_path):
+    """Import tender categories from JSON file into the database"""
+    print("\n" + "="*70)
+    print("IMPORTING TENDER CATEGORIES FROM JSON")
+    print("="*70)
+    
+    json_data = load_categories_json(json_path)
+    if not json_data:
+        print("❌ Failed to load categories from JSON file.")
+        return False
+    
+    success_count = 0
+    for category in json_data:
+        if save_tender_category(conn, category['id'], category['name'], category['category']):
+            success_count += 1
+    
+    print(f"✅ Successfully imported {success_count} of {len(json_data)} tender categories")
+    return True
+
+# New function to import organizations from JSON file
+def import_organizations_from_json(conn, json_path):
+    """Import organizations from JSON file into the database"""
+    print("\n" + "="*70)
+    print("IMPORTING ORGANIZATIONS FROM JSON")
+    print("="*70)
+    
+    json_data = load_organizations_json(json_path)
+    if not json_data:
+        print("❌ Failed to load organizations from JSON file.")
+        return False
+    
+    success_count = 0
+    for site_id, name in json_data.items():
+        if save_organization(conn, site_id, name):
+            success_count += 1
+    
+    print(f"✅ Successfully imported {success_count} of {len(json_data)} organizations")
+    return True
+
 if __name__ == "__main__":
     # Check database status when run independently
     print("=" * 70)
@@ -636,8 +717,22 @@ if __name__ == "__main__":
             setup_database(conn)
             print("✅ Database tables created successfully.")
             
-            # Restore data if we had backups
-            if 'organizations' in existing_tables:
+            # Import data from JSON files
+            categories_imported = import_categories_from_json(conn, "./data/tender_categories.json")
+            organizations_imported = import_organizations_from_json(conn, "./data/organizations.json")
+            
+            if categories_imported:
+                print("✅ Successfully imported tender categories from JSON file")
+            else:
+                print("⚠️ Failed to import tender categories from JSON file")
+                
+            if organizations_imported:
+                print("✅ Successfully imported organizations from JSON file")
+            else:
+                print("⚠️ Failed to import organizations from JSON file")
+            
+            # Restore data if we had backups - only if JSON imports failed
+            if not categories_imported and 'organizations' in existing_tables:
                 print("📤 Importing organizations data from backup...")
                 cur.execute("""
                 INSERT INTO organizations
