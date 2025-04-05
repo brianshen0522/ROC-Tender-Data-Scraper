@@ -2,7 +2,7 @@ import os
 import sys
 import time
 import glob
-from datetime import datetime
+from datetime import datetime, date
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -34,7 +34,21 @@ def parse_roc_date(date_str):
     except Exception as e:
         print("Error parsing date:", e)
         return None
+
+def convert_to_roc_date(gregorian_date):
+    """Convert Gregorian date to ROC date string (e.g., '113/10/30')"""
+    if not gregorian_date:
+        return None
+        
+    if isinstance(gregorian_date, str):
+        try:
+            gregorian_date = datetime.strptime(gregorian_date, "%Y-%m-%d").date()
+        except:
+            return None
     
+    roc_year = gregorian_date.year - 1911
+    return f"{roc_year}/{gregorian_date.month:02d}/{gregorian_date.day:02d}"
+
 def cleanup_debug_images(keep_debug_files=False):
     """Remove debug image files from the debug_images directory"""
     if not keep_debug_files and os.path.exists('debug_images'):

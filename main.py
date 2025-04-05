@@ -76,12 +76,15 @@ def discovery_phase(driver, conn, query_sentence, time_range, page_size, keep_de
                     project_name = tender_info["project_name"]
                     detail_link = tender_info["detail_link"]
                     pk_pms_main = tender_info["pk_pms_main"]
-                    pub_date = tender_info["pub_date"]
-                    deadline = tender_info["deadline"]
+                    pub_date = tender_info["pub_date"]  # This is now in ROC format
+                    deadline = tender_info["deadline"]  # This is now in ROC format
                     
                     # Skip tenders without publication date (required for primary key)
                     if pub_date is None:
                         print(f"⚠️ Skipping tender '{tender_no}' - missing publication date")
+                        continue
+                    elif isinstance(pub_date, str) and pub_date.strip() == '':
+                        print(f"⚠️ Skipping tender '{tender_no}' - empty publication date")
                         continue
                     
                     print(f"Discovering tender {row_index+1}/{len(rows)}: '{tender_no}'")
@@ -113,8 +116,8 @@ def discovery_phase(driver, conn, query_sentence, time_range, page_size, keep_de
                         "organization_id": org_site_id,
                         "tender_no": tender_no,
                         "project_name": project_name,
-                        "publication_date": pub_date,
-                        "deadline": deadline,
+                        "publication_date": pub_date,  # Use the ROC date string
+                        "deadline": deadline,          # Use the ROC date string
                         "url": detail_link,
                         "pk_pms_main": pk_pms_main,  # Store this for later detail fetch
                         "scrap_status": "found",

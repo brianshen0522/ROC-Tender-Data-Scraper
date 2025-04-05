@@ -175,7 +175,7 @@ def process_card(index, xpath, driver, left_half, right_half):
         left_ratio = calculate_overlap_ratio(left_half, card_image)
         right_ratio = calculate_overlap_ratio(right_half, card_image)
         
-        print(f"Card {index+1}: Left ratio: {left_ratio:.3f}, Right ratio: {right_ratio:.3f}")
+        # print(f"Card {index+1}: Left ratio: {left_ratio:.3f}, Right ratio: {right_ratio:.3f}")
         
         return {
             'index': index,
@@ -274,7 +274,7 @@ def solve_card_captcha(driver, attempt=1, max_attempts=10):
             temp_right_ratios[best_left_match_idx] = -1  # Exclude the left match
             best_right_match_idx = temp_right_ratios.index(max(temp_right_ratios))
         
-        print(f"Best matches: Left -> Card {best_left_match_idx+1}, Right -> Card {best_right_match_idx+1}")
+        # print(f"Best matches: Left -> Card {best_left_match_idx+1}, Right -> Card {best_right_match_idx+1}")
         
         # If no valid elements were found, retry
         if not card_elements or len(card_elements) < 6:

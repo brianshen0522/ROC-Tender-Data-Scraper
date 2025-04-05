@@ -1,6 +1,8 @@
 import os
 import psycopg2
 from dotenv import load_dotenv
+from utils import convert_to_roc_date, parse_roc_date
+from datetime import datetime
 
 # Load environment variables from .env file
 load_dotenv()
@@ -77,7 +79,17 @@ def setup_database(conn):
     );
     """)
 
+    # Create tender_category table
+    cur.execute("""
+    CREATE TABLE IF NOT EXISTS tender_categories (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        category TEXT NOT NULL
+    );
+    """)
+
     # Create merged tenders table with a composite primary key and url as unique
+    # Note: publication_date and deadline are now TEXT to store ROC dates
     cur.execute("""
     CREATE TABLE IF NOT EXISTS tenders (
         organization_id TEXT,
@@ -85,8 +97,8 @@ def setup_database(conn):
         url TEXT UNIQUE,
         pk_pms_main TEXT,
         project_name TEXT,
-        publication_date DATE,
-        deadline DATE,
+        publication_date TEXT,
+        deadline TEXT,
         scrap_status TEXT,
         org_name TEXT,
         agency_address TEXT,
@@ -97,7 +109,7 @@ def setup_database(conn):
         procurement_data TEXT,
         tender_id TEXT,
         tender_title TEXT,
-        item_category TEXT,
+        item_category TEXT REFERENCES tender_categories(id),
         nature_of_procurement TEXT,
         procurement_amount_range TEXT,
         handling_method TEXT,
@@ -164,6 +176,73 @@ def save_organization(conn, site_id, name):
         conn.rollback()
         return False
 
+def save_tender_category(conn, category_id, name, category_type):
+    """Save a tender category to the database"""
+    if not conn:
+        return False
+    
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "INSERT INTO tender_categories (id, name, category) VALUES (%s, %s, %s) ON CONFLICT (id) DO NOTHING",
+            (category_id, name, category_type)
+        )
+        conn.commit()
+        cur.close()
+        return True
+    except Exception as e:
+        print(f"⚠️ Error saving tender category: {e}")
+        conn.rollback()
+        return False
+
+def get_or_create_category(conn, category_data):
+    """Get existing category or create a new one if it doesn't exist
+    
+    Args:
+        conn: Database connection
+        category_data: String like "勞務類\n866 - 與管理顧問有關之服務"
+        
+    Returns:
+        category_id: The ID of the category (e.g., "866")
+    """
+    if not conn or not category_data:
+        return None
+    
+    try:
+        # Parse the category data
+        lines = category_data.strip().split('\n')
+        if len(lines) < 2:
+            print(f"⚠️ Invalid category format: {category_data}")
+            return None
+        
+        category_type = lines[0].strip()
+        
+        # Parse the ID and name
+        parts = lines[1].strip().split(' - ', 1)
+        if len(parts) < 2:
+            print(f"⚠️ Cannot parse category ID and name from: {lines[1]}")
+            return None
+        
+        category_id = parts[0].strip()
+        name = parts[1].strip()
+        
+        # Check if category exists
+        cur = conn.cursor()
+        cur.execute("SELECT id FROM tender_categories WHERE id = %s", (category_id,))
+        result = cur.fetchone()
+        
+        if not result:
+            # Create new category
+            save_tender_category(conn, category_id, name, category_type)
+            print(f"✅ Created new tender category: {category_id} - {name} ({category_type})")
+        
+        cur.close()
+        return category_id
+    except Exception as e:
+        print(f"⚠️ Error getting or creating category: {e}")
+        conn.rollback()
+        return None
+
 def get_organization_id(conn, org_name):
     """Get organization ID from the database by name"""
     if not conn:
@@ -210,6 +289,26 @@ def save_tender(conn, tender_data):
     if tender_data['tender_no'] is None or tender_data['organization_id'] is None or tender_data['publication_date'] is None:
         print("⚠️ NULL values in primary key fields. Cannot save.")
         return False
+    
+    # Process item_category if present
+    if 'item_category' in tender_data and tender_data['item_category']:
+        category_id = get_or_create_category(conn, tender_data['item_category'])
+        if category_id:
+            tender_data['item_category'] = category_id
+        else:
+            # If we couldn't parse the category, don't update this field
+            tender_data.pop('item_category', None)
+    
+    # Convert dates to ROC format
+    if 'publication_date' in tender_data and tender_data['publication_date']:
+        # If it's already an ROC date string (e.g., '113/10/30'), keep it as is
+        if not isinstance(tender_data['publication_date'], str) or '/' not in tender_data['publication_date']:
+            tender_data['publication_date'] = convert_to_roc_date(tender_data['publication_date'])
+    
+    if 'deadline' in tender_data and tender_data['deadline']:
+        # If it's already an ROC date string (e.g., '113/10/30'), keep it as is
+        if not isinstance(tender_data['deadline'], str) or '/' not in tender_data['deadline']:
+            tender_data['deadline'] = convert_to_roc_date(tender_data['deadline'])
     
     try:
         cur = conn.cursor()
@@ -292,6 +391,142 @@ def save_tender(conn, tender_data):
         conn.rollback()
         return False
 
+# Add a function to migrate existing dates to ROC format
+def migrate_dates_to_roc_format(conn):
+    """
+    Migrate existing Gregorian dates in the database to ROC format
+    """
+    if not conn:
+        print("❌ Cannot migrate dates without database connection.")
+        return False
+    
+    try:
+        cur = conn.cursor()
+        
+        # Check if we need migration by examining column type
+        cur.execute("""
+        SELECT data_type 
+        FROM information_schema.columns 
+        WHERE table_name = 'tenders' AND column_name = 'publication_date';
+        """)
+        column_type = cur.fetchone()[0]
+        
+        if column_type.upper() == 'DATE':
+            print("🔄 Date column is still DATE type, performing schema migration...")
+            
+            # First, create backup tables
+            print("📦 Creating backup of tenders table...")
+            cur.execute("CREATE TABLE IF NOT EXISTS tenders_date_backup AS SELECT * FROM tenders;")
+            
+            # Get count of rows in backup
+            cur.execute("SELECT COUNT(*) FROM tenders_date_backup;")
+            backup_count = cur.fetchone()[0]
+            print(f"✅ Backed up {backup_count} tender records")
+            
+            # Alter the table to change column types
+            print("🔧 Altering table schema...")
+            cur.execute("ALTER TABLE tenders ALTER COLUMN publication_date TYPE TEXT;")
+            cur.execute("ALTER TABLE tenders ALTER COLUMN deadline TYPE TEXT;")
+            
+            # Now update all dates to ROC format
+            print("🔄 Converting dates to ROC format...")
+            
+            # First get all tenders with dates
+            cur.execute("""
+            SELECT tender_no, organization_id, publication_date, deadline 
+            FROM tenders_date_backup
+            WHERE publication_date IS NOT NULL
+            """)
+            
+            tenders_with_dates = cur.fetchall()
+            print(f"📊 Found {len(tenders_with_dates)} tenders with dates to convert")
+            
+            # Update each tender's dates
+            update_count = 0
+            for tender_no, org_id, pub_date, deadline in tenders_with_dates:
+                roc_pub_date = convert_to_roc_date(pub_date)
+                roc_deadline = convert_to_roc_date(deadline) if deadline else None
+                
+                if roc_pub_date:
+                    cur.execute("""
+                    UPDATE tenders 
+                    SET publication_date = %s, deadline = %s
+                    WHERE tender_no = %s AND organization_id = %s
+                    """, (roc_pub_date, roc_deadline, tender_no, org_id))
+                    update_count += 1
+            
+            conn.commit()
+            print(f"✅ Successfully migrated {update_count} tenders to ROC date format")
+        else:
+            print("✅ Date columns are already TEXT type, no schema migration needed.")
+            
+            # Check if there are any dates in Gregorian format that need conversion
+            cur.execute("""
+            SELECT COUNT(*) FROM tenders 
+            WHERE publication_date ~ '^\d{4}-\d{2}-\d{2}$'
+            """)
+            
+            gregorian_count = cur.fetchone()[0]
+            
+            if gregorian_count > 0:
+                print(f"🔄 Found {gregorian_count} dates in Gregorian format (YYYY-MM-DD), converting to ROC...")
+                
+                # Get all tenders with Gregorian dates
+                cur.execute("""
+                SELECT tender_no, organization_id, publication_date, deadline 
+                FROM tenders
+                WHERE publication_date ~ '^\d{4}-\d{2}-\d{2}$'
+                """)
+                
+                tenders_with_gregorian = cur.fetchall()
+                
+                # Update each tender's dates
+                update_count = 0
+                for tender_no, org_id, pub_date, deadline in tenders_with_gregorian:
+                    try:
+                        # Parse the Gregorian date string
+                        gregorian_date = datetime.strptime(pub_date, "%Y-%m-%d").date()
+                        roc_pub_date = convert_to_roc_date(gregorian_date)
+                        
+                        # Handle deadline if it exists
+                        roc_deadline = None
+                        if deadline and isinstance(deadline, str) and deadline.strip() and '-' in deadline:
+                            try:
+                                gregorian_deadline = datetime.strptime(deadline, "%Y-%m-%d").date()
+                                roc_deadline = convert_to_roc_date(gregorian_deadline)
+                            except:
+                                pass
+                        
+                        if roc_pub_date:
+                            cur.execute("""
+                            UPDATE tenders 
+                            SET publication_date = %s
+                            WHERE tender_no = %s AND organization_id = %s
+                            """, (roc_pub_date, tender_no, org_id))
+                            
+                            if roc_deadline:
+                                cur.execute("""
+                                UPDATE tenders 
+                                SET deadline = %s
+                                WHERE tender_no = %s AND organization_id = %s
+                                """, (roc_deadline, tender_no, org_id))
+                                
+                            update_count += 1
+                    except Exception as e:
+                        print(f"⚠️ Error converting dates for tender {tender_no}: {e}")
+                
+                conn.commit()
+                print(f"✅ Successfully converted {update_count} tenders from Gregorian to ROC date format")
+            else:
+                print("✅ All dates are already in ROC format.")
+        
+        return True
+    
+    except Exception as e:
+        print(f"❌ Error during date migration: {e}")
+        conn.rollback()
+        return False
+
 if __name__ == "__main__":
     # Check database status when run independently
     print("=" * 70)
@@ -305,6 +540,10 @@ if __name__ == "__main__":
         exit(1)
     
     try:
+        # Check if we need to migrate dates
+        print("\n🔍 Checking if date migration is needed...")
+        migrate_dates_to_roc_format(conn)
+        
         cur = conn.cursor()
         
         # Check if tables exist
@@ -312,17 +551,17 @@ if __name__ == "__main__":
         SELECT table_name 
         FROM information_schema.tables 
         WHERE table_schema = 'public'
-        AND table_name IN ('organizations', 'tenders');
+        AND table_name IN ('organizations', 'tenders', 'tender_categories');
         """)
         existing_tables = [row[0] for row in cur.fetchall()]
         
         tables_need_setup = False
         
-        if 'organizations' not in existing_tables or 'tenders' not in existing_tables:
+        if 'organizations' not in existing_tables or 'tenders' not in existing_tables or 'tender_categories' not in existing_tables:
             tables_need_setup = True
             print("🔍 Some tables are missing and need to be created.")
         else:
-            # Check if organization table has the expected schema
+            # Check if tender_categories table has the expected schema
             cur.execute("""
             SELECT column_name, data_type, is_nullable, column_default, 
                    (SELECT constraint_type FROM information_schema.table_constraints tc
@@ -332,65 +571,36 @@ if __name__ == "__main__":
                     AND ccu.column_name = c.column_name 
                     AND tc.constraint_type = 'PRIMARY KEY')
             FROM information_schema.columns c
-            WHERE table_name = 'organizations';
+            WHERE table_name = 'tender_categories';
             """)
-            org_columns = {row[0]: row for row in cur.fetchall()}
+            category_columns = {row[0]: row for row in cur.fetchall()}
             
-            # Check if tenders table has the expected schema with composite primary key
+            # Check if the item_category in tenders table is a foreign key to tender_categories
             cur.execute("""
-            SELECT kcu.column_name
+            SELECT tc.constraint_name, tc.constraint_type, kcu.column_name, 
+                   ccu.table_name AS foreign_table_name, ccu.column_name AS foreign_column_name
             FROM information_schema.table_constraints tc
             JOIN information_schema.key_column_usage kcu
-            ON tc.constraint_name = kcu.constraint_name
+              ON tc.constraint_name = kcu.constraint_name
+            JOIN information_schema.constraint_column_usage ccu
+              ON tc.constraint_name = ccu.constraint_name
             WHERE tc.table_name = 'tenders'
-            AND tc.constraint_type = 'PRIMARY KEY'
-            ORDER BY kcu.ordinal_position;
+              AND tc.constraint_type = 'FOREIGN KEY'
+              AND kcu.column_name = 'item_category';
             """)
-            primary_key_columns = [row[0] for row in cur.fetchall()]
-            
-            # Check if url has a unique constraint
-            cur.execute("""
-            SELECT kcu.column_name
-            FROM information_schema.table_constraints tc
-            JOIN information_schema.key_column_usage kcu
-            ON tc.constraint_name = kcu.constraint_name
-            WHERE tc.table_name = 'tenders'
-            AND tc.constraint_type = 'UNIQUE'
-            AND kcu.column_name = 'url';
-            """)
-            url_unique = cur.fetchone() is not None
-            
-            # Check if pk_pms_main column exists
-            cur.execute("""
-            SELECT column_name
-            FROM information_schema.columns
-            WHERE table_name = 'tenders'
-            AND column_name = 'pk_pms_main';
-            """)
-            pk_pms_main_exists = cur.fetchone() is not None
+            item_category_fk = cur.fetchone()
             
             # Check schema matches expected structure
             schema_mismatch = False
             
-            # Check organization table schema
-            if 'site_id' not in org_columns or org_columns['site_id'][4] != 'PRIMARY KEY':
-                print("⚠️ Organizations table schema mismatch: site_id should be PRIMARY KEY")
+            # Check tender_categories table schema
+            if 'id' not in category_columns or category_columns['id'][4] != 'PRIMARY KEY':
+                print("⚠️ tender_categories table schema mismatch: id should be PRIMARY KEY")
                 schema_mismatch = True
             
-            # Check tenders table composite primary key
-            expected_pk_columns = ['tender_no', 'organization_id', 'publication_date']
-            if set(primary_key_columns) != set(expected_pk_columns):
-                print(f"⚠️ Tenders table schema mismatch: primary key should be {expected_pk_columns}, but found {primary_key_columns}")
-                schema_mismatch = True
-            
-            # Check URL unique constraint
-            if not url_unique:
-                print("⚠️ Tenders table schema mismatch: url should have a UNIQUE constraint")
-                schema_mismatch = True
-                
-            # Check pk_pms_main column
-            if not pk_pms_main_exists:
-                print("⚠️ Tenders table schema mismatch: pk_pms_main column is missing")
+            # Check tenders.item_category foreign key
+            if not item_category_fk or item_category_fk[3] != 'tender_categories' or item_category_fk[4] != 'id':
+                print("⚠️ Tenders table schema mismatch: item_category should be a foreign key to tender_categories(id)")
                 schema_mismatch = True
             
             if schema_mismatch:
@@ -419,6 +629,7 @@ if __name__ == "__main__":
                 # Drop tables (in correct order due to foreign key)
                 print("🗑️ Dropping existing tables...")
                 cur.execute("DROP TABLE IF EXISTS tenders;")
+                cur.execute("DROP TABLE IF EXISTS tender_categories;")
                 cur.execute("DROP TABLE IF EXISTS organizations;")
                 
             # Create fresh tables with correct schema
@@ -439,78 +650,120 @@ if __name__ == "__main__":
             
             if 'tenders' in existing_tables:
                 print("📤 Importing tenders data from backup...")
-                # Check if pk_pms_main column exists in the backup
-                cur.execute("""
-                SELECT column_name
-                FROM information_schema.columns
-                WHERE table_name = 'tenders_backup'
-                AND column_name = 'pk_pms_main';
-                """)
-                backup_has_pk_pms_main = cur.fetchone() is not None
                 
-                if backup_has_pk_pms_main:
-                    # Handle potential NULL values in PK columns
-                    cur.execute("""
-                    INSERT INTO tenders
-                    SELECT * FROM tenders_backup
-                    WHERE tender_no IS NOT NULL
-                    AND organization_id IS NOT NULL
-                    AND publication_date IS NOT NULL
-                    ON CONFLICT DO NOTHING;
-                    """)
-                else:
-                    # Need to handle missing pk_pms_main column in backup
-                    # Get column names from backup table
-                    cur.execute("""
-                    SELECT column_name 
-                    FROM information_schema.columns 
-                    WHERE table_name = 'tenders_backup'
-                    ORDER BY ordinal_position;
-                    """)
-                    backup_columns = [row[0] for row in cur.fetchall()]
-                    
-                    # Get column names from new table
-                    cur.execute("""
-                    SELECT column_name 
-                    FROM information_schema.columns 
-                    WHERE table_name = 'tenders'
-                    ORDER BY ordinal_position;
-                    """)
-                    new_columns = [row[0] for row in cur.fetchall()]
-                    
-                    # Find the position to insert pk_pms_main
-                    url_pos = backup_columns.index('url') if 'url' in backup_columns else -1
-                    
-                    # Prepare columns list - insert pk_pms_main after url
-                    if url_pos >= 0:
-                        columns_before_url = backup_columns[:url_pos+1]
-                        columns_after_url = backup_columns[url_pos+1:]
-                        target_columns = columns_before_url + ['pk_pms_main'] + columns_after_url
-                    else:
-                        target_columns = backup_columns + ['pk_pms_main']
-                    
-                    # Build column list for SELECT and INSERT
-                    select_columns = []
-                    for col in target_columns:
-                        if col == 'pk_pms_main':
-                            select_columns.append("NULL as pk_pms_main")
-                        elif col in backup_columns:
-                            select_columns.append(col)
-                    
-                    # Only use columns that exist in the new table
-                    insert_columns = [col for col in target_columns if col in new_columns]
-                    
-                    # Build and execute the import SQL
-                    import_sql = f"""
-                    INSERT INTO tenders ({', '.join(insert_columns)})
-                    SELECT {', '.join(select_columns)}
-                    FROM tenders_backup
-                    WHERE tender_no IS NOT NULL
-                    AND organization_id IS NOT NULL
-                    AND publication_date IS NOT NULL
-                    ON CONFLICT DO NOTHING;
-                    """
-                    cur.execute(import_sql)
+                # We'll need to extract category information from the old item_category field
+                cur.execute("""
+                CREATE TABLE IF NOT EXISTS extracted_categories AS
+                SELECT DISTINCT item_category FROM tenders_backup
+                WHERE item_category IS NOT NULL AND item_category != '';
+                """)
+                
+                # Get all the categories for processing
+                cur.execute("SELECT item_category FROM extracted_categories;")
+                categories = cur.fetchall()
+                
+                # Process and insert categories
+                for (category_data,) in categories:
+                    if not category_data or category_data.strip() == '':
+                        continue
+                        
+                    try:
+                        # Try to parse the category
+                        lines = category_data.strip().split('\n')
+                        if len(lines) < 2:
+                            print(f"⚠️ Invalid category format: {category_data}")
+                            continue
+                        
+                        category_type = lines[0].strip()
+                        
+                        # Parse the ID and name
+                        parts = lines[1].strip().split(' - ', 1)
+                        if len(parts) < 2:
+                            print(f"⚠️ Cannot parse category ID and name from: {lines[1]}")
+                            continue
+                        
+                        category_id = parts[0].strip()
+                        name = parts[1].strip()
+                        
+                        # Insert the category
+                        cur.execute(
+                            "INSERT INTO tender_categories (id, name, category) VALUES (%s, %s, %s) ON CONFLICT (id) DO NOTHING",
+                            (category_id, name, category_type)
+                        )
+                        print(f"✅ Imported category: {category_id} - {name} ({category_type})")
+                    except Exception as e:
+                        print(f"⚠️ Error processing category '{category_data}': {e}")
+                
+                conn.commit()
+                
+                # Get all columns except item_category from tenders_backup
+                cur.execute("""
+                SELECT column_name FROM information_schema.columns 
+                WHERE table_name = 'tenders_backup' 
+                AND column_name != 'item_category'
+                ORDER BY ordinal_position;
+                """)
+                backup_columns = [row[0] for row in cur.fetchall()]
+                
+                # Get all columns except item_category from tenders
+                cur.execute("""
+                SELECT column_name FROM information_schema.columns 
+                WHERE table_name = 'tenders' 
+                AND column_name != 'item_category'
+                ORDER BY ordinal_position;
+                """)
+                new_columns = [row[0] for row in cur.fetchall()]
+                
+                # Find common columns
+                common_columns = [col for col in backup_columns if col in new_columns]
+                
+                # Insert data from backup, omitting item_category for now
+                cur.execute(f"""
+                INSERT INTO tenders ({', '.join(common_columns)})
+                SELECT {', '.join(common_columns)}
+                FROM tenders_backup
+                WHERE tender_no IS NOT NULL
+                AND organization_id IS NOT NULL
+                AND publication_date IS NOT NULL
+                ON CONFLICT DO NOTHING;
+                """)
+                
+                # Now update item_category for each tender, parsing the ID from the original value
+                cur.execute("""
+                SELECT tender_no, organization_id, publication_date, item_category 
+                FROM tenders_backup
+                WHERE item_category IS NOT NULL AND item_category != '';
+                """)
+                
+                tenders_with_categories = cur.fetchall()
+                updated_count = 0
+                
+                for tender_no, org_id, pub_date, category_data in tenders_with_categories:
+                    try:
+                        # Parse the category_id from category_data
+                        lines = category_data.strip().split('\n')
+                        if len(lines) < 2:
+                            continue
+                        
+                        parts = lines[1].strip().split(' - ', 1)
+                        if len(parts) < 2:
+                            continue
+                        
+                        category_id = parts[0].strip()
+                        
+                        # Update the tender with the category_id reference
+                        cur.execute("""
+                        UPDATE tenders
+                        SET item_category = %s
+                        WHERE tender_no = %s AND organization_id = %s AND publication_date = %s;
+                        """, (category_id, tender_no, org_id, pub_date))
+                        
+                        updated_count += 1
+                    except Exception as e:
+                        print(f"⚠️ Error updating category for tender {tender_no}: {e}")
+                
+                conn.commit()
+                print(f"✅ Updated item_category for {updated_count} tenders")
                 
                 cur.execute("SELECT COUNT(*) FROM tenders;")
                 imported_count = cur.fetchone()[0]
@@ -540,11 +793,15 @@ if __name__ == "__main__":
             cur.execute("SELECT COUNT(*) FROM organizations;")
             org_count = cur.fetchone()[0]
             
+            cur.execute("SELECT COUNT(*) FROM tender_categories;")
+            category_count = cur.fetchone()[0]
+            
             cur.execute("SELECT COUNT(*) FROM tenders;")
             tender_count = cur.fetchone()[0]
             
             print(f"\nDatabase Statistics:")
             print(f"📊 Organizations: {org_count} records")
+            print(f"📊 Tender Categories: {category_count} records")
             print(f"📊 Tenders: {tender_count} records")
             
             # Additional statistics
@@ -557,6 +814,14 @@ if __name__ == "__main__":
                 org_with_tenders = cur.fetchone()[0]
                 
                 cur.execute("""
+                SELECT category, COUNT(*) 
+                FROM tender_categories 
+                GROUP BY category
+                ORDER BY category;
+                """)
+                category_counts = cur.fetchall()
+                
+                cur.execute("""
                 SELECT scrap_status, COUNT(*) 
                 FROM tenders 
                 GROUP BY scrap_status
@@ -565,6 +830,11 @@ if __name__ == "__main__":
                 status_counts = cur.fetchall()
                 
                 print(f"📊 Organizations with tenders: {org_with_tenders}")
+                
+                print("\nCategory type distribution:")
+                for category, count in category_counts:
+                    print(f"  - {category}: {count} categories")
+                
                 print("\nTender status distribution:")
                 for status, count in status_counts:
                     status_label = status or "NULL"

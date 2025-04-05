@@ -118,7 +118,7 @@ def fetch_tender_details(driver, pk_pms_main):
         "採購資料": "procurement_data",
         "標案案號": "tender_id",
         "標案名稱": "tender_title",
-        "標的分類": "item_category",
+        "標的分類": "item_category",  # This will be processed by get_or_create_category
         "財物採購性質": "nature_of_procurement",
         "採購金額級距": "procurement_amount_range",
         "辦理方式": "handling_method",
@@ -173,7 +173,13 @@ def fetch_tender_details(driver, pk_pms_main):
                     value = cells[i+1].text.strip()
                 except IndexError:
                     value = ""
+                
+                # Store the raw value
                 detail_data[fields_mapping[text]] = value
+                
+                # Debug log for item_category field
+                if text == "標的分類" and value:
+                    print(f"Found item_category: {value}")
     except Exception as e:
         print("Error extracting tender details:", e)
 
@@ -293,8 +299,14 @@ def extract_tender_info(row):
     pk = detail_link.split("pk=")[-1]
     pk_pms_main = pk
     
-    pub_date = parse_roc_date(cells[4].text.strip())
-    deadline = parse_roc_date(cells[6].text.strip())
+    # Get the ROC date strings from the table cells
+    roc_pub_date = cells[4].text.strip()
+    roc_deadline = cells[6].text.strip()
+    
+    # For reference, also parse the dates into Gregorian format
+    # but we'll use the ROC string format for storage
+    gregorian_pub_date = parse_roc_date(roc_pub_date)
+    gregorian_deadline = parse_roc_date(roc_deadline)
     
     return {
         "org_name": org_name,
@@ -302,6 +314,8 @@ def extract_tender_info(row):
         "project_name": project_name,
         "detail_link": detail_link,
         "pk_pms_main": pk_pms_main,
-        "pub_date": pub_date,
-        "deadline": deadline
+        "pub_date": roc_pub_date,  # Use the ROC date string
+        "deadline": roc_deadline,  # Use the ROC date string
+        "gregorian_pub_date": gregorian_pub_date,  # For reference only
+        "gregorian_deadline": gregorian_deadline   # For reference only
     }
