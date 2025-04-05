@@ -6,15 +6,25 @@ A web scraper for collecting tender data from a Taiwanese government procurement
 
 ```
 .
-├── .env                    # Environment variables and configuration
-├── main.py                 # Main entry point for the scraper
-├── tui.py                  # Textual-based TUI for running the scraper
-├── database.py             # Database connection and operations
-├── scraper.py              # Web scraping functions
-├── captcha_solver.py       # CAPTCHA solving functionality
-├── utils.py                # Utility functions
-├── requirements.txt        # Python dependencies
-└── debug_images/           # Directory for debug images (created automatically)
+├── .env                        # Environment variables and configuration
+├── src/                        # Source code directory
+│   ├── scraper/                # Scraping functionality
+│   │   ├── main.py            # Main entry point for the scraper
+│   │   ├── scraper.py         # Web scraping functions
+│   │   └── captcha_solver.py  # CAPTCHA solving functionality
+│   ├── db/                     # Database operations
+│   │   ├── database.py        # Database connection and operations
+│   │   ├── check_categories.py # Verification for tender categories
+│   │   └── check_organizations.py # Verification for organizations
+│   ├── ui/                     # User interface
+│   │   └── tui.py             # Textual-based TUI for running the scraper
+│   └── utils/                  # Utility functions
+│       └── utils.py           # Utility functions
+├── data/                       # Directory for JSON configuration files
+│   ├── organizations.json     # Organizations data
+│   └── tender_categories.json # Tender categories data
+├── requirements.txt            # Python dependencies
+└── debug_images/               # Directory for debug images (created automatically)
 ```
 
 ## Setup
@@ -45,7 +55,7 @@ A web scraper for collecting tender data from a Taiwanese government procurement
 
 The project includes a Textual-based TUI for an interactive experience. To launch the TUI:
 ```bash
-python tui.py
+python -m src.ui.tui
 ```
 
 The TUI allows you to:
@@ -59,12 +69,12 @@ The TUI allows you to:
 
 Run the scraper with default settings from the `.env` file:
 ```bash
-python main.py
+python -m src.scraper.main
 ```
 
 Or specify command-line arguments to override the defaults:
 ```bash
-python main.py --query "關鍵字" --time "113" --size 50 --headless --phase both
+python -m src.scraper.main --query "關鍵字" --time "113" --size 50 --headless --phase both
 ```
 
 ### Command Line Arguments
@@ -75,6 +85,17 @@ python main.py --query "關鍵字" --time "113" --size 50 --headless --phase bot
 - `--headless`: Run browser in headless mode (default: off)
 - `--keep-debug`: Keep debug images after CAPTCHA solving (default: off)
 - `--phase`: Run only the discovery phase, only the detail phase, or both (default: both)
+
+### Verification Tools
+
+The project includes tools to verify database content:
+```bash
+# Check organization data
+python -m src.db.check_organizations
+
+# Check tender categories
+python -m src.db.check_categories
+```
 
 ## Features
 
@@ -87,21 +108,27 @@ python main.py --query "關鍵字" --time "113" --size 50 --headless --phase bot
 
 ## Database Schema
 
-The scraper stores data in two PostgreSQL tables:
+The scraper stores data in three PostgreSQL tables:
 
 1. **organizations**: Stores information about organizations
    - `site_id` (TEXT, PRIMARY KEY): Organization's site ID
    - `name` (TEXT, UNIQUE NOT NULL): Organization's name
 
-2. **tenders**: Stores tender information
+2. **tender_categories**: Stores tender category information
+   - `id` (TEXT, PRIMARY KEY): Category ID
+   - `name` (TEXT NOT NULL): Category name
+   - `category` (TEXT NOT NULL): Category type
+
+3. **tenders**: Stores tender information
    - `organization_id` (TEXT, FOREIGN KEY): Reference to organizations table
    - `tender_no` (TEXT): Tender number
    - `url` (TEXT, UNIQUE): URL of the tender
    - `project_name` (TEXT): Name of the tender project
-   - `publication_date` (DATE): Publication date
-   - `deadline` (DATE): Tender deadline
+   - `publication_date` (TEXT): Publication date in ROC format (e.g., '113/04/01')
+   - `deadline` (TEXT): Tender deadline in ROC format
    - `scrap_status` (TEXT): Status of scraping ('found', 'finished', 'failed')
    - `pk_pms_main` (TEXT): Unique identifier for fetching tender details
+   - `item_category` (TEXT, FOREIGN KEY): Reference to tender_categories table
    - ... (many more fields from the tender details)
 
 ## Notes
@@ -112,3 +139,4 @@ The scraper stores data in two PostgreSQL tables:
 - The scraper uses a two-phase approach:
   1. **Discovery Phase**: Finds tenders and saves basic information.
   2. **Detail Phase**: Fetches detailed information for tenders with a "found" status.
+- The project requires Chrome/Chromium and ChromeDriver installed for Selenium to work.
