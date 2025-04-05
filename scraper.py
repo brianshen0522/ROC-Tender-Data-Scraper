@@ -181,8 +181,8 @@ def fetch_tender_details(driver, pk_pms_main):
     driver.switch_to.window(main_window)
     return detail_data
 
-def check_page_data_loaded(driver, page_size, max_retries=5):
-    """Check if the data is loaded correctly with retry mechanism"""
+def check_page_data_loaded(driver, page_size, base_url, current_url, query_sentence, time_range, headless=False, max_retries=5):
+    """Check if the data is loaded correctly with browser restart mechanism"""
     current_retry = 0
     last_row_count = 0
     consistent_count = 0  # Track how many times we get the same count
@@ -193,41 +193,88 @@ def check_page_data_loaded(driver, page_size, max_retries=5):
         rows = driver.find_elements(By.CSS_SELECTOR, "#bulletion > tbody > tr")
         row_count = len(rows)
         
-        # If we have a full page, we're good
+        # If we have a full page, we're good - continue to next page
         if row_count >= page_size:
             print(f"📊 Found {row_count} tenders - will continue to next page after processing")
             break
         
-        # If this is our last retry, accept whatever we have
-        if current_retry == max_retries - 1:
-            print(f"📑 Found {row_count} tenders after {max_retries} retries - this may be the last page")
-            more_pages = False if row_count == 0 else True  # Only stop if we found zero rows
+        # If we have some data but less than the page size, it's the last page - don't retry
+        if 0 < row_count < page_size:
+            print(f"📑 Found {row_count} tenders which is less than page size - this is the last page")
+            more_pages = False  # Signal this is the last page
             break
             
-        # Otherwise, check if we have consistent counts
-        elif row_count == last_row_count and row_count > 0:
-            # Only count consistency if we have actual rows (don't trust zero results)
+        # If no data found (row_count == 0), proceed with retry logic
+        
+        # If this is our last retry with zero rows, accept that result
+        if current_retry == max_retries - 1:
+            print(f"📑 Found 0 tenders after {max_retries} retries - this may be the last page")
+            print("⚠️ No tenders found after maximum retries. Signaling to restart browser without advancing page.")
+            more_pages = True  # Continue the loop, but...
+            return rows, more_pages, driver, False  # Add a flag to indicate "don't advance page"
+            
+        # Otherwise, check if we have consistent counts for zero rows
+        elif row_count == last_row_count and row_count == 0:
+            # Only count consistency for zero results
             consistent_count += 1
-            if consistent_count >= 3:  # Require 3 consistent counts to be sure
-                print(f"📑 Found {row_count} tenders (verified after {current_retry+1} retries) - this may be the last page")
-                more_pages = True  # Still process this page
-                break
+            if consistent_count >= 3:  # Require 3 consistent zero counts to be sure
+                print(f"📑 Found 0 tenders consistently (verified after {current_retry+1} retries) - need to restart browser")
+                # We don't break here - proceed with browser restart
+                pass
         else:
             # Reset the consistency counter if count changed
             consistent_count = 0
         
-        # Retry
-        print(f"🔄 Found only {row_count} tenders, which is less than page size {page_size}. Reloading to verify (retry {current_retry+1}/{max_retries})...")
-        driver.refresh()
-        time.sleep(5)  # Wait longer for the page to fully load
+        # BROWSER RESTART APPROACH with multi-stage loading:
+        print(f"🔄 Found only {row_count} tenders, which is less than page size {page_size}.")
+        print(f"🔄 Restarting browser and establishing fresh session (retry {current_retry+1}/{max_retries})...")
         
-        # Handle CAPTCHA if it appears after refresh
+        # Close the current browser
+        driver.quit()
+        
+        # Set up a new browser instance
+        driver = setup_selenium_driver(headless=headless)
+        
+        # STEP 1: First navigate to the base search page (without pagination)
+        print(f"🔍 Establishing new session with base search URL...")
+        driver.get("https://web.pcc.gov.tw/prkms/tender/common/bulletion/readBulletion")
+        time.sleep(3)  # Wait for the page to load
+        
+        # Handle CAPTCHA if present on the base page
         handle_captcha(driver, False)
+        
+        # STEP 2: Perform the initial search to establish a fresh session
+        print(f"🔍 Performing initial search with parameters: query='{query_sentence}', year={time_range}")
+        driver.get(base_url)
+        time.sleep(3)  # Wait for search results to load
+        
+        # Handle CAPTCHA if it appears after search
+        handle_captcha(driver, False)
+        
+        # Check if this initial search was successful
+        initial_rows = driver.find_elements(By.CSS_SELECTOR, "#bulletion > tbody > tr")
+        if len(initial_rows) > 0:
+            print(f"✅ Initial search successful, found {len(initial_rows)} tenders")
+            
+            # STEP 3: Only then navigate to the specific pagination page that was failing
+            # But only if we're not already on the first page
+            if current_url != base_url:
+                print(f"📄 Now navigating to the specific page that failed: {current_url}")
+                driver.get(current_url)
+                time.sleep(3)  # Wait for the paginated results to load
+                
+                # Handle CAPTCHA if it appears after pagination
+                handle_captcha(driver, False)
+        else:
+            print(f"⚠️ Initial search failed to load any results, trying direct navigation to failed page")
+            driver.get(current_url)
+            time.sleep(3)
+            handle_captcha(driver, False)
         
         last_row_count = row_count
         current_retry += 1
     
-    return rows, more_pages
+    return rows, more_pages, driver, True  # Return the driver and a flag indicating "advance page"
 
 def extract_tender_info(row):
     """Extract tender information from a table row"""

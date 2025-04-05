@@ -14,7 +14,7 @@ sys.stdout.reconfigure(encoding='utf-8')
 # Load environment variables from .env file
 load_dotenv()
 
-def discovery_phase(driver, conn, query_sentence, time_range, page_size, keep_debug_files):
+def discovery_phase(driver, conn, query_sentence, time_range, page_size, keep_debug_files, headless=False):
     """Phase 1: Find all tenders and save basic information with 'found' status"""
     print("\n" + "="*70)
     print("PHASE 1: TENDER DISCOVERY")
@@ -33,20 +33,29 @@ def discovery_phase(driver, conn, query_sentence, time_range, page_size, keep_de
         while more_pages:
             # Construct URL with pagination parameter
             if current_page == 1:
-                url = base_url
+                current_url = base_url
                 print(f"🔍 Starting search with parameters: query='{query_sentence}', year={time_range}")
             else:
-                url = f"{base_url}&d-3611040-p={current_page}"
-                print(f"📄 Loading page {current_page}: {url}")
+                current_url = f"{base_url}&d-3611040-p={current_page}"
+                print(f"📄 Loading page {current_page}: {current_url}")
                 
-            driver.get(url)
+            driver.get(current_url)
             time.sleep(1)
 
             # Handle CAPTCHA if present
             handle_captcha(driver, keep_debug_files)
 
-            # Check if data is loaded correctly
-            rows, more_pages = check_page_data_loaded(driver, page_size)
+            # Check if data is loaded correctly - now returns potentially updated driver
+            # and a flag indicating whether to advance page
+            rows, more_pages, driver, advance_page = check_page_data_loaded(
+                driver, 
+                page_size, 
+                base_url,           # Base URL for initial search
+                current_url,        # Current paginated URL
+                query_sentence,     # Query parameters for establishing a new session
+                time_range,         # Time range for search
+                headless
+            )
             
             # Process tender rows
             for row_index, row in enumerate(rows):
@@ -55,7 +64,7 @@ def discovery_phase(driver, conn, query_sentence, time_range, page_size, keep_de
                     conn = ensure_connection(conn)
                     if not conn:
                         print("❌ Database connection failed. Exiting.")
-                        return tender_count
+                        return tender_count, driver
                     
                     # Extract tender info from the row
                     tender_info = extract_tender_info(row)
@@ -129,8 +138,15 @@ def discovery_phase(driver, conn, query_sentence, time_range, page_size, keep_de
                         print(f"⚠️ Error recovering from row processing error: {e2}")
                     continue
             
-            # Move to the next page
-            current_page += 1
+            # Check if we should advance to the next page
+            if advance_page:
+                # Move to the next page
+                current_page += 1
+                print(f"✅ Advancing to page {current_page}")
+            else:
+                print(f"🔄 Staying on page {current_page} for retry with fresh browser")
+                # Give a short pause before trying again with the fresh browser
+                time.sleep(2)
             
             # Add a short delay before loading the next page
             time.sleep(1)
@@ -146,7 +162,7 @@ def discovery_phase(driver, conn, query_sentence, time_range, page_size, keep_de
         print(f"❌ Unexpected error during discovery: {e}")
         
     print(f"Discovery phase completed. Found {tender_count} new tenders.")
-    return tender_count
+    return tender_count, driver
 
 def detail_phase(driver, conn, keep_debug_files):
     """Phase 2: Fetch detailed information for all tenders with 'found' status"""
@@ -299,9 +315,10 @@ def main():
     try:
         # Run the requested phases
         if phase in ['discovery', 'both']:
-            discovery_phase(driver, conn, query_sentence, time_range, page_size, keep_debug_files)
+            tender_count, driver = discovery_phase(driver, conn, query_sentence, time_range, page_size, keep_debug_files, headless)
         
         if phase in ['detail', 'both']:
+            # Make sure we're using the potentially updated driver from the discovery phase
             detail_phase(driver, conn, keep_debug_files)
         
     except Exception as e:
