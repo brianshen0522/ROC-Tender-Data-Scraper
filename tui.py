@@ -36,11 +36,16 @@ class ScraperTUI(App):
         margin-bottom: 1;
     }
     #buttons {
+        layout: vertical;
+        align: left middle;
+        margin-top: 1;
+    }
+    #button_row {
         layout: horizontal;
         align: left middle;
         margin-top: 1;
     }
-    #quit_button, #check_db_button {
+    #quit_button {
         margin-left: 1;
     }
     #log {
@@ -83,10 +88,12 @@ class ScraperTUI(App):
                     
                     yield Checkbox(label="Headless Mode", id="headless")
                     yield Checkbox(label="Keep Debug Files", id="keep_debug")
-                with Horizontal(id="buttons"):
-                    yield Button("Run Scraper", id="run_button")
+                with Vertical(id="buttons"):
+                    # Check DB button is now above Run Scraper button
                     yield Button("Check DB", id="check_db_button")
-                    yield Button("Quit", id="quit_button")
+                    with Horizontal(id="button_row"):
+                        yield Button("Run Scraper", id="run_button")
+                        yield Button("Quit", id="quit_button")
             with Vertical(id="right_panel"):
                 yield Log(id="log")
 
@@ -213,7 +220,7 @@ class ScraperTUI(App):
             self.exit()
 
     def on_mount(self) -> None:
-        self.query_one("#run_button", Button).focus()
+        self.query_one("#check_db_button", Button).focus()
 
 if __name__ == "__main__":
     os.chdir(os.path.dirname(os.path.abspath(__file__)))
